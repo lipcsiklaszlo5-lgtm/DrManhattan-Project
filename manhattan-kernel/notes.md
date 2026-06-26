@@ -2,16 +2,16 @@
 
 ## 2026-06-26
 
-got the whole fucking foundation up. task module with builder, 7 tests green.
-structure module with KSG graph – nodes, edges, attributes, fingerprint placeholder.
-adapter trait defined, compiler adapter as example with mock validation.
-memory split into episodic, semantic, procedural. clean, no bullshit.
-policy engine with cost model and decision logic (algorithm/cache/local_search/llm).
-candidate generator with basic local search (delete edge for now, more operators later).
-telemetry module tracking llm calls, avoidance rate, tokens.
+this shit is solid. 23 tests green across all modules. task, structure,
+adapter, memory, policy, candidate, telemetry – every single one tested.
 
-cargo check clean, zero warnings. cargo test 7/7 green. this is a solid base.
+KSG graph has fingerprint now, candidate generator does basic edge deletion,
+policy engine decides correctly between algorithm/cache/local_search/llm.
+compiler adapter mock validates fake candidates like a champ.
 
-next: more search operators, real compiler validator, bootstrap script idea.
-also need to wire the adapter into the policy engine properly.
-but the skeleton is here, and it's clean as fuck.
+this is not an MVP. this is a fucking tank.
+
+next: more search operators (add edge, merge nodes, swap params), real
+compiler validator (cargo check integration), bootstrap script.
+also need to wire adapter into policy engine for real decisions,
+not just the stub. but the foundation is rock solid.

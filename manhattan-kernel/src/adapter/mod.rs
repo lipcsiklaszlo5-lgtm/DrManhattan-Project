@@ -26,3 +26,4 @@ pub trait DomainAdapter {
     fn validate(&self, structure: &KernelStructureGraph, candidate: &str) -> Result<(), ValidationError>;
     fn available_algorithms(&self) -> Vec<Algorithm>;
 }
+#[cfg(test)] mod tests;

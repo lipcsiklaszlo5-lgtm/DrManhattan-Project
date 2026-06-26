@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct KernelStructureGraph {
@@ -44,5 +46,23 @@ impl KernelStructureGraph {
             rel_type: rel_type.to_string(),
             attributes: HashMap::new(),
         });
+    }
+
+    pub fn fingerprint(&self) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        let mut node_ids: Vec<&String> = self.nodes.iter().map(|n| &n.id).collect();
+        node_ids.sort();
+        for id in node_ids {
+            id.hash(&mut hasher);
+        }
+        let mut edge_keys: Vec<(&String, &String, &String)> = self.edges.iter()
+            .map(|e| (&e.from, &e.to, &e.rel_type)).collect();
+        edge_keys.sort();
+        for (f, t, r) in edge_keys {
+            f.hash(&mut hasher);
+            t.hash(&mut hasher);
+            r.hash(&mut hasher);
+        }
+        hasher.finish()
     }
 }

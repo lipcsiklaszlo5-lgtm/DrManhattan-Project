@@ -44,3 +44,4 @@ impl PolicyEngine {
         self.candidate_gen.generate(structure, max_candidates)
     }
 }
+#[cfg(test)] mod tests;
