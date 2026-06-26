@@ -8,7 +8,9 @@ use crate::telemetry::Telemetry;
 use crate::memory::episodic::EpisodicEntry;
 use crate::memory::semantic::SemanticSchema;
 use crate::memory::procedural::ProceduralRule;
+use crate::memory::loader::load_schemas;
 use crate::executor::LlmExecutor;
+use std::path::Path;
 
 #[derive(Debug, Clone)]
 pub struct CostModel {
@@ -45,6 +47,15 @@ impl<'a> PolicyEngine<'a> {
     pub fn with_llm_executor(mut self, executor: &'a LlmExecutor) -> Self {
         self.llm_executor = Some(executor);
         self
+    }
+
+    /// Betölti a schemas.json fájlt és feltölti a memóriát.
+    pub fn load_schemas(&mut self, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+        let schemas = load_schemas(path)?;
+        for (fp, schema) in schemas {
+            self.semantic_schemas.insert(fp, schema);
+        }
+        Ok(())
     }
 
     fn check_cache(&self, structure: &KernelStructureGraph) -> Option<&ProceduralRule> {
@@ -97,7 +108,6 @@ impl<'a> PolicyEngine<'a> {
             confidence: 0.5,
             domain_tags: vec!["compiler".into()],
         };
-        // Tároljuk a sikeres operátort is
         schema.structure_snapshot.nodes.iter_mut().for_each(|n| {
             if n.node_type == "compiler_error" {
                 n.attributes.insert("successful_action".into(), action.to_string());
