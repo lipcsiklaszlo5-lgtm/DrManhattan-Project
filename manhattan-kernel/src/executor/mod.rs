@@ -1,6 +1,10 @@
 use crate::task::Task;
 use crate::executor::types::{Cost, ExecutorOutput, ExecutorError};
+
 pub mod types;
+pub mod llm_executor;
+
+pub use llm_executor::LlmExecutor;
 
 pub trait Executor {
     fn executor_id(&self) -> &str;
@@ -11,6 +15,7 @@ pub trait Executor {
 }
 
 pub struct AlwaysFailExecutor;
+
 impl Executor for AlwaysFailExecutor {
     fn executor_id(&self) -> &str { "always-fail-stub" }
     fn can_handle(&self, _: &Task) -> bool { false }
