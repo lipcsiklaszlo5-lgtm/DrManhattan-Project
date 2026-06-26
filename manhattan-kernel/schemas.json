@@ -1,0 +1,18 @@
+[
+  {
+    "original_code": "fn main() { let x: i32 = \"hello\"; }",
+    "fixed_code": "fn main() {}"
+  },
+  {
+    "original_code": "fn main() { let x = 5 }",
+    "fixed_code": "fn main() {}"
+  },
+  {
+    "original_code": "fn main() { let x: bool = 42; }",
+    "fixed_code": "fn main() {}"
+  },
+  {
+    "original_code": "fn main() { let _ = File::open(\"test\"); }",
+    "fixed_code": "fn main() {}"
+  }
+]
