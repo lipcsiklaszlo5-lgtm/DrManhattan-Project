@@ -6,6 +6,7 @@ pub mod policy;
 pub mod candidate;
 pub mod telemetry;
 pub mod executor;
+pub mod schema;
 
 pub use task::{Task, TaskBuilder, TaskContext};
 pub use structure::KernelStructureGraph;

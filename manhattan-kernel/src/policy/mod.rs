@@ -6,10 +6,12 @@ use crate::candidate::CandidateGenerator;
 use crate::structure::KernelStructureGraph;
 use crate::telemetry::Telemetry;
 use crate::memory::episodic::EpisodicEntry;
-use crate::memory::semantic::SemanticSchema;
+use crate::memory::semantic::{SemanticSchema, Predicate};
 use crate::memory::procedural::ProceduralRule;
 use crate::memory::loader::load_schemas;
 use crate::executor::LlmExecutor;
+use crate::schema::index::SchemaIndex;
+use crate::schema::composer::SchemaComposer;
 use std::path::Path;
 
 #[derive(Debug, Clone)]
@@ -28,7 +30,8 @@ pub struct PolicyEngine<'a> {
     candidate_gen: CandidateGenerator,
     rules: HashMap<u64, ProceduralRule>,
     episodic_log: Vec<EpisodicEntry>,
-    semantic_schemas: HashMap<u64, SemanticSchema>,
+    semantic_schemas: HashMap<uuid::Uuid, SemanticSchema>,
+    schema_index: SchemaIndex,
     llm_executor: Option<&'a LlmExecutor>,
 }
 
@@ -40,6 +43,7 @@ impl<'a> PolicyEngine<'a> {
             rules: HashMap::new(),
             episodic_log: Vec::new(),
             semantic_schemas: HashMap::new(),
+            schema_index: SchemaIndex::new(),
             llm_executor: None,
         }
     }
@@ -49,11 +53,11 @@ impl<'a> PolicyEngine<'a> {
         self
     }
 
-    /// Betölti a schemas.json fájlt és feltölti a memóriát.
     pub fn load_schemas(&mut self, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
         let schemas = load_schemas(path)?;
-        for (fp, schema) in schemas {
-            self.semantic_schemas.insert(fp, schema);
+        for (_fp, schema) in schemas {
+            self.schema_index.insert(&schema);
+            self.semantic_schemas.insert(schema.id, schema);
         }
         Ok(())
     }
@@ -100,20 +104,53 @@ impl<'a> PolicyEngine<'a> {
         self.episodic_log.push(entry);
     }
 
+    /// Build a SemanticSchema from a solved task, inferring predicates from the action.
     fn store_semantic_schema(&mut self, structure: &KernelStructureGraph, _solution: &str, action: &str) {
         let fp = structure.fingerprint();
-        let mut schema = SemanticSchema {
-            id: uuid::Uuid::new_v4(),
-            structure_snapshot: structure.clone(),
-            confidence: 0.5,
-            domain_tags: vec!["compiler".into()],
-        };
-        schema.structure_snapshot.nodes.iter_mut().for_each(|n| {
-            if n.node_type == "compiler_error" {
-                n.attributes.insert("successful_action".into(), action.to_string());
+        let mut schema = SemanticSchema::new(structure.clone());
+        schema.metadata.tags = vec!["compiler".into()];
+        schema.metadata.fingerprint = fp;
+
+        // Infer predicates from the action
+        match action {
+            "replace_type" | "fix_main" => {
+                schema.algebra.requires.insert(Predicate::TypeMismatch);
+                schema.algebra.provides.insert(Predicate::TypeResolved);
             }
-        });
-        self.semantic_schemas.insert(fp, schema);
+            "add_import" => {
+                schema.algebra.requires.insert(Predicate::MissingImport);
+                schema.algebra.provides.insert(Predicate::ImportResolved);
+            }
+            "rename" => {
+                schema.algebra.requires.insert(Predicate::UnresolvedName);
+                schema.algebra.provides.insert(Predicate::NameResolved);
+            }
+            _ => {
+                // Generic fallback
+                schema.algebra.requires.insert(Predicate::TypeMismatch);
+                schema.algebra.provides.insert(Predicate::TypeResolved);
+            }
+        }
+
+        self.schema_index.insert(&schema);
+        self.semantic_schemas.insert(schema.id, schema);
+    }
+
+    fn extract_predicates(&self, structure: &KernelStructureGraph) -> Vec<Predicate> {
+        let mut preds = Vec::new();
+        for node in &structure.nodes {
+            if node.node_type == "compiler_error" {
+                if let Some(msg) = node.attributes.get("message") {
+                    if msg.contains("mismatched types") {
+                        preds.push(Predicate::TypeMismatch);
+                    }
+                    if msg.contains("not found") || msg.contains("cannot find") {
+                        preds.push(Predicate::MissingImport);
+                    }
+                }
+            }
+        }
+        preds
     }
 
     pub fn decide(&self, task: &Task, _adapter: &dyn DomainAdapter) -> &str {
@@ -126,7 +163,7 @@ impl<'a> PolicyEngine<'a> {
                     return "cache";
                 }
             }
-            return "local_search";
+            return "schema_plan";
         }
         if self.cost_model.estimate_llm_cost(task) < 0.02 {
             return "llm";
@@ -217,38 +254,63 @@ impl<'a> PolicyEngine<'a> {
                     }
                 }
             }
-            "local_search" => {
-                let structure = task.context.structure.as_ref().unwrap().clone();
-                match self.run_local_search(&structure, adapter, &original_code, 5) {
-                    Some(solution) => {
-                        telemetry.record_local_search_success();
-                        result = solution;
-                        success = true;
-                    }
-                    None => {
-                        if let Some(executor) = self.llm_executor {
-                            match executor.execute(task) {
-                                Ok(output) => {
-                                    telemetry.record_llm_call(output.confidence as u64, 200);
-                                    if let Some(structure) = &task.context.structure {
-                                        if adapter.validate(structure, &output.content).is_ok() {
-                                            self.store_rule(structure, &output.content);
-                                            self.store_semantic_schema(structure, &output.content, "llm");
-                                            result = output.content;
-                                            success = true;
-                                        }
+            "schema_plan" => {
+                if let Some(structure) = &task.context.structure.clone() {
+                    let predicates = self.extract_predicates(structure);
+                    if !predicates.is_empty() {
+                        let composer = SchemaComposer::new(
+                            self.schema_index.clone(),
+                            self.semantic_schemas.clone(),
+                        );
+                        let plan = composer.compose(&predicates);
+                        if !plan.is_empty() {
+                            if let Some(step) = plan.first() {
+                                if let Some(schema) = self.semantic_schemas.get(&step.schema_id) {
+                                    let code = adapter.graph_to_code(&schema.graph, &original_code);
+                                    if adapter.validate(structure, &code).is_ok() {
+                                        telemetry.record_local_search_success();
+                                        self.store_rule(structure, &code);
+                                        result = code;
+                                        success = true;
                                     }
-                                    if !success {
-                                        result = "llm response failed validation".to_string();
-                                    }
-                                }
-                                Err(_) => {
-                                    result = "llm executor error".to_string();
                                 }
                             }
-                        } else {
-                            telemetry.record_llm_call(100, 200);
-                            result = "llm fallback solution".to_string();
+                        }
+                    }
+                }
+                if !success {
+                    let structure = task.context.structure.as_ref().unwrap().clone();
+                    match self.run_local_search(&structure, adapter, &original_code, 5) {
+                        Some(solution) => {
+                            telemetry.record_local_search_success();
+                            result = solution;
+                            success = true;
+                        }
+                        None => {
+                            if let Some(executor) = self.llm_executor {
+                                match executor.execute(task) {
+                                    Ok(output) => {
+                                        telemetry.record_llm_call(output.confidence as u64, 200);
+                                        if let Some(structure) = &task.context.structure {
+                                            if adapter.validate(structure, &output.content).is_ok() {
+                                                self.store_rule(structure, &output.content);
+                                                self.store_semantic_schema(structure, &output.content, "llm");
+                                                result = output.content;
+                                                success = true;
+                                            }
+                                        }
+                                        if !success {
+                                            result = "llm response failed validation".to_string();
+                                        }
+                                    }
+                                    Err(_) => {
+                                        result = "llm executor error".to_string();
+                                    }
+                                }
+                            } else {
+                                telemetry.record_llm_call(100, 200);
+                                result = "llm fallback solution".to_string();
+                            }
                         }
                     }
                 }
