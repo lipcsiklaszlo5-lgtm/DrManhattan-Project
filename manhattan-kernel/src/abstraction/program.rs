@@ -67,6 +67,9 @@ impl ProgramSynthesizer {
                         steps.push(Transformation::Create { color: color.clone(), bbox_x: *bbox_x, bbox_y: *bbox_y, bbox_w: bw, bbox_h: bh });
                     }
                 }
+                NodeTransformation::Rotate { node_id, angle } => {
+                    steps.push(Transformation::Rotate { node_id: node_id.clone(), angle: *angle });
+                }
                 NodeTransformation::Unchanged { .. } => {}
             }
         }
@@ -82,35 +85,104 @@ impl ProgramSynthesizer {
         Some(program)
     }
 
-    pub fn find_best_program(&mut self, graph: &KernelStructureGraph, target: &KernelStructureGraph) -> Option<&Program> {
-        // Ha van már illeszkedő programunk, azt használjuk
-        let has_match = self.programs.iter().any(|p| {
-            let result = p.apply(graph);
-            result.nodes.len() == target.nodes.len() // Egyszerű ellenőrzés, bővíthető tartalomra is
-        });
+    pub fn generalize_from_pairs(&mut self, pairs: &[(KernelStructureGraph, KernelStructureGraph)]) -> Option<Program> {
+        if pairs.is_empty() { return None; }
 
-        if !has_match {
-            // Folyékony intelligencia: ha nincs kész program, tanuljunk a példából!
-            if let Some(learned) = self.learn_from_example(graph, target) {
-                self.programs.push(learned);
-            }
+        let mut all_operator_types: Vec<Vec<String>> = Vec::new();
+
+        for (before, after) in pairs {
+            let diffs: Vec<_> = graph_diff(before, after).into_iter().filter(|d| !matches!(d, NodeTransformation::Unchanged { .. })).collect();
+            let op_types: Vec<String> = diffs.iter().map(|d| match d {
+                NodeTransformation::Translate { .. } => "Translate".to_string(),
+                NodeTransformation::Recolor { .. } => "Recolor".to_string(),
+                NodeTransformation::Delete { .. } => "Delete".to_string(),
+                NodeTransformation::Create { .. } => "Create".to_string(),
+                NodeTransformation::Rotate { .. } => "Rotate".to_string(),
+                NodeTransformation::Unchanged { .. } => "Unchanged".to_string(),
+            }).collect();
+            all_operator_types.push(op_types);
         }
 
-        // Visszaadjuk a legmagasabb konfidenciájú érvényes programot
-        let mut best_idx: Option<usize> = None;
-        let mut max_conf = -1.0;
-        
-        for (i, p) in self.programs.iter().enumerate() {
-            let result = p.apply(graph);
-            // Szigorúbb ellenőrzés: egyezzen meg a csomópontok száma
-            if result.nodes.len() == target.nodes.len() {
-                if p.confidence > max_conf {
-                    max_conf = p.confidence;
-                    best_idx = Some(i);
+        let common_types = Self::intersect_sequences(&all_operator_types);
+
+        if common_types.is_empty() {
+            let (before, after) = &pairs[0];
+            return self.learn_from_example(before, after);
+        }
+
+        let (before, after) = &pairs[0];
+        let diffs: Vec<_> = graph_diff(before, after).into_iter().filter(|d| !matches!(d, NodeTransformation::Unchanged { .. })).collect();
+
+        let mut steps = Vec::new();
+        for (i, diff) in diffs.iter().enumerate() {
+            if i < common_types.len() {
+                match diff {
+                    NodeTransformation::Recolor { .. } => {
+                        steps.push(Transformation::RecolorToTarget { node_id: "obj_0".to_string() });
+                    }
+                    NodeTransformation::Translate { .. } => {
+                        steps.push(Transformation::TranslateToTarget { node_id: "obj_0".to_string() });
+                    }
+                    NodeTransformation::Rotate { angle, .. } => {
+                        steps.push(Transformation::Rotate { node_id: "obj_0".to_string(), angle: *angle });
+                    }
+                    _ => {
+                        if let Some(step) = Self::diff_to_step(diff, after) {
+                            steps.push(step);
+                        }
+                    }
                 }
             }
         }
-        
-        best_idx.map(|idx| &self.programs[idx])
+
+        if steps.is_empty() { return None; }
+
+        let program = Program::new(steps);
+        self.programs.push(program.clone());
+        Some(program)
+    }
+
+    fn intersect_sequences(sequences: &[Vec<String>]) -> Vec<String> {
+        if sequences.is_empty() { return vec![]; }
+        let first = &sequences[0];
+        first.iter().enumerate().filter(|(i, op_type)| {
+            sequences.iter().all(|seq| seq.get(*i) == Some(op_type))
+        }).map(|(_, op_type)| op_type.clone()).collect()
+    }
+
+    fn diff_to_step(diff: &NodeTransformation, after: &KernelStructureGraph) -> Option<Transformation> {
+        match diff {
+            NodeTransformation::Translate { node_id, dx, dy } => {
+                Some(Transformation::Translate { node_id: node_id.clone(), dx: *dx, dy: *dy })
+            }
+            NodeTransformation::Recolor { node_id, new_color } => {
+                Some(Transformation::Recolor { node_id: node_id.clone(), new_color: new_color.clone() })
+            }
+            NodeTransformation::Delete { node_id } => {
+                Some(Transformation::Delete { node_id: node_id.clone() })
+            }
+            NodeTransformation::Create { node_id: nid, color, bbox_x, bbox_y } => {
+                if let Some(new_node) = after.nodes.iter().find(|n| n.id == *nid) {
+                    let bw = new_node.attributes.get("bbox_w").and_then(|v| v.parse().ok()).unwrap_or(1);
+                    let bh = new_node.attributes.get("bbox_h").and_then(|v| v.parse().ok()).unwrap_or(1);
+                    Some(Transformation::Create { color: color.clone(), bbox_x: *bbox_x, bbox_y: *bbox_y, bbox_w: bw, bbox_h: bh })
+                } else {
+                    None
+                }
+            }
+            NodeTransformation::Rotate { node_id, angle } => {
+                Some(Transformation::Rotate { node_id: node_id.clone(), angle: *angle })
+            }
+            NodeTransformation::Unchanged { .. } => None,
+        }
+    }
+
+    pub fn find_best_program(&self, graph: &KernelStructureGraph, target: &KernelStructureGraph) -> Option<&Program> {
+        self.programs.iter()
+            .filter(|p| {
+                let result = p.apply(graph);
+                result.nodes.len() == target.nodes.len()
+            })
+            .max_by(|a, b| a.confidence.partial_cmp(&b.confidence).unwrap())
     }
 }

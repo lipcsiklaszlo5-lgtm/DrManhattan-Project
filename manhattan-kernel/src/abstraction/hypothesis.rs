@@ -158,6 +158,9 @@ impl HypothesisManager {
                 crate::sandbox::operators::Transformation::Merge { .. } => "Merge",
                 crate::sandbox::operators::Transformation::Split { .. } => "Split",
                 crate::sandbox::operators::Transformation::NoOp => "NoOp",
+                crate::sandbox::operators::Transformation::RecolorToTarget { .. } => "RecolorToTarget",
+                crate::sandbox::operators::Transformation::TranslateToTarget { .. } => "TranslateToTarget",
+                crate::sandbox::operators::Transformation::Rotate { .. } => "Rotate",
             };
             self.cost_weights.get(op_name).copied().unwrap_or(1.0)
         }).sum()

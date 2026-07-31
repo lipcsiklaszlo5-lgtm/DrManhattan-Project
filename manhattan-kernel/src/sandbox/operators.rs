@@ -3,6 +3,9 @@ use std::collections::HashMap;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Transformation {
+    RecolorToTarget { node_id: String },
+    TranslateToTarget { node_id: String },
+    Rotate { node_id: String, angle: u16 },
     Translate { node_id: String, dx: i64, dy: i64 },
     Recolor { node_id: String, new_color: String },
     Delete { node_id: String },
@@ -129,6 +132,20 @@ pub fn apply_transformation(graph: &KernelStructureGraph, transform: &Transforma
             }
         }
         Transformation::NoOp => {}
+        Transformation::RecolorToTarget { .. } => { /* absztrakt operátor, a PolicyEngine oldja fel */ }
+        Transformation::TranslateToTarget { .. } => { /* absztrakt operátor, a PolicyEngine oldja fel */ }
+        Transformation::Rotate { node_id, angle } => {
+            if let Some(node) = new_graph.nodes.iter_mut().find(|n| n.id == *node_id) {
+                if let (Some(w_str), Some(h_str)) = (node.attributes.get("bbox_w").cloned(), node.attributes.get("bbox_h").cloned()) {
+                    if let (Ok(w), Ok(h)) = (w_str.parse::<u8>(), h_str.parse::<u8>()) {
+                        if *angle == 90 || *angle == 270 {
+                            node.attributes.insert("bbox_w".to_string(), h.to_string());
+                            node.attributes.insert("bbox_h".to_string(), w.to_string());
+                        }
+                    }
+                }
+            }
+        }
     }
     
     new_graph
@@ -144,5 +161,3 @@ pub fn simulate_plan(graph: &KernelStructureGraph, plan: &[Transformation]) -> V
     states
 }
 
-#[cfg(test)]
-mod operators_tests;

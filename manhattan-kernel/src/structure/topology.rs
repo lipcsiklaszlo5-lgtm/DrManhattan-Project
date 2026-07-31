@@ -1,7 +1,16 @@
 use crate::structure::{KernelStructureGraph, Node};
 use std::collections::{HashMap, HashSet};
 
-/// Weisfeiler-Lehman színkódolás iterációja egy gráfra.
+#[derive(Debug, Clone, PartialEq)]
+pub enum NodeTransformation {
+    Translate { node_id: String, dx: i64, dy: i64 },
+    Recolor { node_id: String, new_color: String },
+    Delete { node_id: String },
+    Create { node_id: String, color: String, bbox_x: u64, bbox_y: u64 },
+    Rotate { node_id: String, angle: u16 },
+    Unchanged { node_id: String },
+}
+
 fn wl_iteration(graph: &KernelStructureGraph, colors: &mut HashMap<String, u64>) {
     let mut new_colors: HashMap<String, Vec<u64>> = HashMap::new();
     for node in &graph.nodes {
@@ -29,7 +38,6 @@ fn wl_iteration(graph: &KernelStructureGraph, colors: &mut HashMap<String, u64>)
     }
 }
 
-/// WL hash egy gráfra (3 iteráció).
 pub fn wl_hash(graph: &KernelStructureGraph, iterations: usize) -> u64 {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
@@ -55,7 +63,6 @@ pub fn wl_hash(graph: &KernelStructureGraph, iterations: usize) -> u64 {
     for c in &sorted_colors {
         c.hash(&mut hasher);
     }
-    // Attribútumok hashelése a strukturális változások detektálásához (rendezve a determinizmusért)
     let mut node_ids: Vec<&String> = graph.nodes.iter().map(|n| &n.id).collect();
     node_ids.sort();
     for id in node_ids {
@@ -73,17 +80,6 @@ pub fn wl_hash(graph: &KernelStructureGraph, iterations: usize) -> u64 {
     hasher.finish()
 }
 
-/// Transzformáció típusok a gráfok közötti különbségek leírására.
-#[derive(Debug, Clone, PartialEq)]
-pub enum NodeTransformation {
-    Translate { node_id: String, dx: i64, dy: i64 },
-    Recolor { node_id: String, new_color: String },
-    Delete { node_id: String },
-    Create { node_id: String, color: String, bbox_x: u64, bbox_y: u64 },
-    Unchanged { node_id: String },
-}
-
-/// Két KSG gráf összehasonlítása és a transzformációk kinyerése.
 pub fn graph_diff(
     before: &KernelStructureGraph,
     after: &KernelStructureGraph,
@@ -95,7 +91,6 @@ pub fn graph_diff(
     let before_ids: HashSet<&String> = before_nodes.keys().collect();
     let after_ids: HashSet<&String> = after_nodes.keys().collect();
 
-    // Új csomópontok (Create)
     for id in after_ids.difference(&before_ids) {
         if let Some(node) = after_nodes.get(*id) {
             let color = node.attributes.get("color").cloned().unwrap_or_default();
@@ -110,19 +105,16 @@ pub fn graph_diff(
         }
     }
 
-    // Törölt csomópontok (Delete)
     for id in before_ids.difference(&after_ids) {
         transformations.push(NodeTransformation::Delete {
             node_id: id.to_string(),
         });
     }
 
-    // Meglévő csomópontok változásai
     for id in before_ids.intersection(&after_ids) {
         let before_node = before_nodes[*id];
         let after_node = after_nodes[*id];
 
-        // Színváltozás
         let before_color = before_node.attributes.get("color").cloned().unwrap_or_default();
         let after_color = after_node.attributes.get("color").cloned().unwrap_or_default();
         if before_color != after_color {
@@ -132,7 +124,6 @@ pub fn graph_diff(
             });
         }
 
-        // Pozícióváltozás
         let bx: i64 = before_node.attributes.get("bbox_x").and_then(|v| v.parse().ok()).unwrap_or(0);
         let by: i64 = before_node.attributes.get("bbox_y").and_then(|v| v.parse().ok()).unwrap_or(0);
         let ax: i64 = after_node.attributes.get("bbox_x").and_then(|v| v.parse().ok()).unwrap_or(0);
@@ -145,11 +136,33 @@ pub fn graph_diff(
             });
         }
 
-        // Ha semmi sem változott
+        // Rotate detektálása: ha a szélesség és magasság felcserélődött
+        if let (Some(b_w), Some(b_h), Some(a_w), Some(a_h)) = (
+            before_node.attributes.get("bbox_w").and_then(|v| v.parse::<u8>().ok()),
+            before_node.attributes.get("bbox_h").and_then(|v| v.parse::<u8>().ok()),
+            after_node.attributes.get("bbox_w").and_then(|v| v.parse::<u8>().ok()),
+            after_node.attributes.get("bbox_h").and_then(|v| v.parse::<u8>().ok()),
+        ) {
+            if b_w == a_h && b_h == a_w && b_w != b_h {
+                transformations.push(NodeTransformation::Rotate {
+                    node_id: id.to_string(),
+                    angle: 90,
+                });
+            }
+        }
+
         if before_color == after_color && bx == ax && by == ay {
-            transformations.push(NodeTransformation::Unchanged {
-                node_id: id.to_string(),
-            });
+            // Csak akkor Unchanged, ha semmi más nem változott
+            let w_changed = before_node.attributes.get("bbox_w") != after_node.attributes.get("bbox_w");
+            let h_changed = before_node.attributes.get("bbox_h") != after_node.attributes.get("bbox_h");
+            let rotated = w_changed && h_changed && 
+                before_node.attributes.get("bbox_w") == after_node.attributes.get("bbox_h") &&
+                before_node.attributes.get("bbox_h") == after_node.attributes.get("bbox_w");
+            if !rotated {
+                transformations.push(NodeTransformation::Unchanged {
+                    node_id: id.to_string(),
+                });
+            }
         }
     }
 

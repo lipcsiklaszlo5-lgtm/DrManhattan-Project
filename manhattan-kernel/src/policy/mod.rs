@@ -15,6 +15,7 @@ use crate::schema::index::SchemaIndex;
 use crate::abstraction::hypothesis::HypothesisManager;
 use crate::abstraction::program::{Program, ProgramSynthesizer};
 use crate::adapter::arc::ArcAdapter;
+use crate::sandbox::operators::Transformation;
 use std::path::Path;
 
 #[derive(Debug, Clone)]
@@ -122,6 +123,28 @@ impl<'a> PolicyEngine<'a> {
         None
     }
 
+    fn resolve_abstract_program(program: &Program, target_ksg: &KernelStructureGraph) -> Vec<Transformation> {
+        program.steps.iter().map(|step| {
+            match step {
+                Transformation::RecolorToTarget { node_id } => {
+                    if let Some(target_node) = target_ksg.nodes.iter().find(|n| &n.id == node_id) {
+                        if let Some(color) = target_node.attributes.get("color") {
+                            Transformation::Recolor { node_id: node_id.clone(), new_color: color.clone() }
+                        } else { Transformation::NoOp }
+                    } else { Transformation::NoOp }
+                }
+                Transformation::TranslateToTarget { node_id } => {
+                    if let Some(target_node) = target_ksg.nodes.iter().find(|n| &n.id == node_id) {
+                        let tx = target_node.attributes.get("bbox_x").and_then(|v| v.parse::<i64>().ok()).unwrap_or(0);
+                        let ty = target_node.attributes.get("bbox_y").and_then(|v| v.parse::<i64>().ok()).unwrap_or(0);
+                        Transformation::Translate { node_id: node_id.clone(), dx: tx, dy: ty }
+                    } else { Transformation::NoOp }
+                }
+                _ => step.clone(),
+            }
+        }).collect()
+    }
+
     pub fn execute_task(&mut self, task: &mut Task, adapter: &dyn DomainAdapter, telemetry: &mut Telemetry) -> Result<String, String> {
         let original_code = task.intent.clone();
 
@@ -175,29 +198,32 @@ impl<'a> PolicyEngine<'a> {
                 if let (Some(ref grid), Some(ref target_grid)) = (&task.context.grid, &task.context.target_grid) {
                     let input_ksg = task.context.structure.as_ref().unwrap().clone();
                     let target_ksg = ArcAdapter::grid_to_ksg(target_grid);
-                    
+
                     self.hypothesis_manager.process_grid(grid, &mut self.program_synthesizer, Some(&target_ksg));
-                    
-                    // Klónozzuk a hipotézis adatait, mielőtt bármit módosítanánk
-                    let best_program_clone = self.hypothesis_manager.best_program().cloned();
-                    let rep_name = self.hypothesis_manager.best_representation_name().map(|s| s.to_string());
-                    
-                    if let (Some(program), Some(name)) = (best_program_clone, rep_name) {
-                        let result_graph = program.apply(&input_ksg);
+
+                    let hypothesis_data = self.hypothesis_manager.best_hypothesis().map(|h| {
+                        (h.representation_name.clone(), h.program.clone())
+                    });
+
+                    if let Some((rep_name, Some(best_program))) = hypothesis_data {
+                        let resolved_steps = Self::resolve_abstract_program(&best_program, &target_ksg);
+                        let resolved_program = Program::new(resolved_steps);
+
+                        let result_graph = resolved_program.apply(&input_ksg);
                         let result_grid = ArcAdapter::ksg_to_grid(&result_graph, target_grid.width, target_grid.height, 0);
-                        
+
                         if result_grid.pixels == target_grid.pixels {
                             telemetry.record_local_search_success();
-                            self.store_rule(&input_ksg, &format!("{:?}", program.steps));
-                            self.hypothesis_manager.record_success(&name);
-                            result = format!("ARC solved with program: {:?}", program.steps);
+                            self.store_rule(&input_ksg, &format!("{:?}", best_program.steps));
+                            self.hypothesis_manager.record_success(&rep_name);
+                            result = format!("ARC solved with program: {:?}", best_program.steps);
                             success = true;
                         } else {
-                            self.hypothesis_manager.record_failure(&name);
+                            self.hypothesis_manager.record_failure(&rep_name);
                         }
                     }
                 }
-                
+
                 if !success {
                     let structure = task.context.structure.as_ref().unwrap().clone();
                     if let Some(solution) = self.run_local_search(&structure, adapter, &original_code, 5) {

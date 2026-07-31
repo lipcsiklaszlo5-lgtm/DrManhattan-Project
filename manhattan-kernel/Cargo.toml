@@ -37,3 +37,19 @@ path = "tests/unit_program_synthesizer_test.rs"
 [[test]]
 name = "arc_multi_op"
 path = "tests/arc_multi_op_test.rs"
+
+[[test]]
+name = "unit_generalize"
+path = "tests/unit_generalize_test.rs"
+
+[[test]]
+name = "arc_generalize"
+path = "tests/arc_generalize_test.rs"
+
+[[test]]
+name = "unit_abstract_recolor"
+path = "tests/unit_abstract_recolor_test.rs"
+
+[[test]]
+name = "unit_rotate"
+path = "tests/unit_rotate_test.rs"
