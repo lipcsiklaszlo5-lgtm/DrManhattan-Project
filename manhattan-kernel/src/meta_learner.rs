@@ -63,6 +63,8 @@ impl MetaLearner {
                 if let Some(name) = rep_name {
                     self.hypothesis_manager.record_success(&name);
                 }
+                // Fogalomtanulás sikeres tanulás után is
+                self.analyze_and_adapt(&task.grid, &task.target);
                 let key = "agent_one_shot".to_string();
                 let entry = self.task_stats.entry(key).or_insert((0,0));
                 entry.0 += 1; entry.1 += 1;
@@ -74,6 +76,7 @@ impl MetaLearner {
                         if let Some(learned) = self.explorer.synthesizer.programs.last() {
                             self.program_synthesizer.programs.push(learned.clone());
                         }
+                        self.analyze_and_adapt(&task.grid, &task.target);
                         let key = "explorer".to_string();
                         let entry = self.task_stats.entry(key).or_insert((0,0));
                         entry.0 += 1; entry.1 += 1;
@@ -126,14 +129,12 @@ impl MetaLearner {
                 self.program_synthesizer.learn_from_example(&input_ksg, &sg.target_ksg);
             }
         }
-        // Use concept learner to extract new concepts from the difference
         let new_concepts = self.concept_learner.learn_from_diff(&input_ksg, &target_ksg, &self.concept_registry);
         for concept in new_concepts {
             println!("Discovered new concept: {:?}", concept);
-            // Register the new concept in the concept registry (simplistic: just store the enum, later we'd generate a detector)
-            // For now, we just add it to the discovered list; the actual detector infrastructure will be expanded later.
+            self.concept_registry.add_concept(concept.clone());
+            self.program_synthesizer.map_concept_to_transform(concept, "Translate");
         }
-        // Also call the existing discover_concepts (heuristic) for immediate coverage
         let static_concepts = self.discover_concepts(&input_ksg, &target_ksg);
         for concept in static_concepts {
             println!("Static concept detected: {:?}", concept);

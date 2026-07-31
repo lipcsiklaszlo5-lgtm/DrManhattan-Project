@@ -20,6 +20,7 @@ use crate::sandbox::operators::Transformation;
 use crate::hypothesis_bus::HypothesisBus;
 use crate::agent::explorer::ExplorerAgent;
 use crate::agent::agent_loop::Environment;
+use crate::concept::ConceptRegistry;
 use std::path::Path;
 
 #[derive(Debug, Clone)]
@@ -43,6 +44,7 @@ pub struct PolicyEngine<'a> {
     pub hypothesis_manager: HypothesisManager,
     pub program_synthesizer: ProgramSynthesizer,
     pub explorer: ExplorerAgent,
+    pub concept_registry: ConceptRegistry,
 }
 
 impl<'a> PolicyEngine<'a> {
@@ -54,6 +56,7 @@ impl<'a> PolicyEngine<'a> {
             hypothesis_manager: HypothesisManager::new(),
             program_synthesizer: ProgramSynthesizer::new(),
             explorer: ExplorerAgent::new(),
+            concept_registry: ConceptRegistry::default(),
         }
     }
 
@@ -122,18 +125,24 @@ impl<'a> PolicyEngine<'a> {
         self.record_operator_attempt(&action);
         let mut candidates = self.candidate_gen.generate(structure, max_candidates);
 
+        // Gyűjtsük össze az összes releváns fogalmat
+        let mut concepts = Vec::new();
         if let Some(ref mut bus) = self.hypothesis_bus {
-            let concepts: Vec<String> = bus.get_hypotheses().into_iter().map(|h| h.concept.to_lowercase()).collect();
-            if !concepts.is_empty() {
-                candidates.sort_by_key(|c| {
-                    let action = c.nodes.iter()
-                        .find(|n| n.node_type == "compiler_error")
-                        .and_then(|n| n.attributes.get("action").cloned())
-                        .unwrap_or_default();
-                    let matches = concepts.iter().any(|concept| action.to_lowercase().contains(concept));
-                    if matches { 0 } else { 1 }
-                });
-            }
+            concepts.extend(bus.get_hypotheses().into_iter().map(|h| h.concept.to_lowercase()));
+        }
+        // A ConceptRegistry-ből is veszünk fogalmakat
+        let reg_concepts: Vec<String> = self.concept_registry.scan(structure).iter().map(|c| format!("{:?}", c).to_lowercase()).collect();
+        concepts.extend(reg_concepts);
+
+        if !concepts.is_empty() {
+            candidates.sort_by_key(|c| {
+                let action = c.nodes.iter()
+                    .find(|n| n.node_type == "compiler_error")
+                    .and_then(|n| n.attributes.get("action").cloned())
+                    .unwrap_or_default();
+                let matches = concepts.iter().any(|concept| action.to_lowercase().contains(concept));
+                if matches { 0 } else { 1 }
+            });
         }
 
         for c in &candidates {

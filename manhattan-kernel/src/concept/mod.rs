@@ -25,14 +25,26 @@ pub trait ConceptDetector {
 
 pub struct ConceptRegistry {
     detectors: Vec<Box<dyn ConceptDetector>>,
+    learned_concepts: Vec<Concept>,
+}
+
+impl Clone for ConceptRegistry {
+    fn clone(&self) -> Self {
+        Self {
+            detectors: Vec::new(), // detektorokat nem klónozunk (statikusak)
+            learned_concepts: self.learned_concepts.clone(),
+        }
+    }
 }
 
 impl ConceptRegistry {
-    pub fn new() -> Self { Self { detectors: Vec::new() } }
+    pub fn new() -> Self { Self { detectors: Vec::new(), learned_concepts: Vec::new() } }
     pub fn add_detector(&mut self, det: Box<dyn ConceptDetector>) { self.detectors.push(det); }
+    pub fn add_concept(&mut self, concept: Concept) { self.learned_concepts.push(concept); }
     pub fn scan(&self, graph: &KernelStructureGraph) -> Vec<Concept> {
         let mut results = Vec::new();
         for det in &self.detectors { results.extend(det.detect(graph)); }
+        results.extend(self.learned_concepts.clone());
         results.sort(); results.dedup(); results
     }
 }

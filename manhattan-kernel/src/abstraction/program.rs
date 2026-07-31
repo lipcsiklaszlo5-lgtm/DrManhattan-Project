@@ -2,6 +2,7 @@ use crate::sandbox::operators::Transformation;
 use crate::structure::KernelStructureGraph;
 use crate::structure::topology::{graph_diff, NodeTransformation};
 use super::transform::{TransformRule, Condition, TransformationAlgebra};
+use crate::concept::Concept;
 
 #[derive(Debug, Clone)]
 pub struct Program {
@@ -17,7 +18,6 @@ impl Program {
     }
 
     pub fn cost(&self) -> f64 {
-        // lower confidence → higher cost; also penalise long programs slightly
         (1.0 - self.confidence as f64) * (self.steps.len() as f64).max(1.0)
     }
 
@@ -42,11 +42,31 @@ impl Program {
 pub struct ProgramSynthesizer {
     pub programs: Vec<Program>,
     pub algebra: TransformationAlgebra,
+    concept_transforms: Vec<(Concept, String)>,
 }
 
 impl ProgramSynthesizer {
     pub fn new() -> Self {
-        Self { programs: Vec::new(), algebra: TransformationAlgebra::new() }
+        let mut ct = Vec::new();
+        // Alapértelmezett fogalom-transzformáció hozzárendelések (core knowledge)
+        ct.push((Concept::Connected, "Translate".into()));
+        ct.push((Concept::Symmetry, "Recolor".into()));
+        ct.push((Concept::Player, "Translate".into()));
+        ct.push((Concept::Exit, "Translate".into()));
+        ct.push((Concept::Hole, "Delete".into()));
+        ct.push((Concept::Largest, "Translate".into()));
+        Self { programs: Vec::new(), algebra: TransformationAlgebra::new(), concept_transforms: ct }
+    }
+
+    pub fn map_concept_to_transform(&mut self, concept: Concept, transform_name: &str) {
+        self.concept_transforms.push((concept, transform_name.to_string()));
+    }
+
+    pub fn transforms_for_concept(&self, concept: &Concept) -> Vec<String> {
+        self.concept_transforms.iter()
+            .filter(|(c, _)| c == concept)
+            .map(|(_, t)| t.clone())
+            .collect()
     }
 
     pub fn learn_from_example(&mut self, before: &KernelStructureGraph, after: &KernelStructureGraph) -> Option<Program> {
