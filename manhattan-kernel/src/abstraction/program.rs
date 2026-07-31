@@ -16,6 +16,11 @@ impl Program {
         Self { steps, conditions: vec![Condition::AlwaysTrue], confidence: 0.5, success_count: 1 }
     }
 
+    pub fn cost(&self) -> f64 {
+        // lower confidence → higher cost; also penalise long programs slightly
+        (1.0 - self.confidence as f64) * (self.steps.len() as f64).max(1.0)
+    }
+
     pub fn apply(&self, graph: &KernelStructureGraph) -> KernelStructureGraph {
         let mut current = graph.clone();
         for step in &self.steps {

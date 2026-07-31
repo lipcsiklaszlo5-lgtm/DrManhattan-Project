@@ -17,6 +17,7 @@ use crate::abstraction::program::{Program, ProgramSynthesizer};
 use crate::abstraction::goal_decomposer::GoalDecomposer;
 use crate::adapter::arc::ArcAdapter;
 use crate::sandbox::operators::Transformation;
+use crate::hypothesis_bus::HypothesisBus;
 use std::path::Path;
 
 #[derive(Debug, Clone)]
@@ -36,6 +37,7 @@ pub struct PolicyEngine<'a> {
     semantic_schemas: HashMap<uuid::Uuid, SemanticSchema>,
     schema_index: SchemaIndex,
     llm_executor: Option<&'a LlmExecutor>,
+    hypothesis_bus: Option<&'a mut HypothesisBus>,
     pub hypothesis_manager: HypothesisManager,
     pub program_synthesizer: ProgramSynthesizer,
 }
@@ -45,12 +47,15 @@ impl<'a> PolicyEngine<'a> {
         Self {
             cost_model, candidate_gen, rules: HashMap::new(), episodic_log: Vec::new(),
             semantic_schemas: HashMap::new(), schema_index: SchemaIndex::new(), llm_executor: None,
+            hypothesis_bus: None,
             hypothesis_manager: HypothesisManager::new(),
             program_synthesizer: ProgramSynthesizer::new(),
         }
     }
 
     pub fn with_llm_executor(mut self, executor: &'a LlmExecutor) -> Self { self.llm_executor = Some(executor); self }
+    pub fn with_hypothesis_bus(mut self, bus: &'a mut HypothesisBus) -> Self { self.hypothesis_bus = Some(bus); self }
+
     pub fn load_schemas(&mut self, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
         let schemas = load_schemas(path)?;
         for (_fp, schema) in schemas { self.schema_index.insert(&schema); self.semantic_schemas.insert(schema.id, schema); }
@@ -111,7 +116,23 @@ impl<'a> PolicyEngine<'a> {
     pub fn run_local_search(&mut self, structure: &KernelStructureGraph, adapter: &dyn DomainAdapter, original_code: &str, max_candidates: usize) -> Option<String> {
         let action = structure.nodes.iter().find(|n| n.node_type == "compiler_error").and_then(|n| n.attributes.get("action").cloned()).unwrap_or_default();
         self.record_operator_attempt(&action);
-        let candidates = self.candidate_gen.generate(structure, max_candidates);
+        let mut candidates = self.candidate_gen.generate(structure, max_candidates);
+
+        // Bonsai concept influence: reorder candidates so that concept-matched ones come first
+        if let Some(ref mut bus) = self.hypothesis_bus {
+            let concepts: Vec<String> = bus.get_hypotheses().into_iter().map(|h| h.concept.to_lowercase()).collect();
+            if !concepts.is_empty() {
+                candidates.sort_by_key(|c| {
+                    let action = c.nodes.iter()
+                        .find(|n| n.node_type == "compiler_error")
+                        .and_then(|n| n.attributes.get("action").cloned())
+                        .unwrap_or_default();
+                    let matches = concepts.iter().any(|concept| action.to_lowercase().contains(concept));
+                    if matches { 0 } else { 1 }
+                });
+            }
+        }
+
         for c in &candidates {
             let code = adapter.graph_to_code(c, original_code);
             if adapter.validate(structure, &code).is_ok() {

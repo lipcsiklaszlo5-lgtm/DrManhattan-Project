@@ -1,168 +1,77 @@
 use crate::structure::KernelStructureGraph;
 use crate::adapter::arc::adapter::ArcGrid;
-use crate::abstraction::representation::RepresentationFactory;
 use crate::abstraction::program::{Program, ProgramSynthesizer};
-use std::collections::HashMap;
+use crate::abstraction::representation::{RepresentationFactory};
 
 #[derive(Debug, Clone)]
 pub struct Hypothesis {
     pub representation_name: String,
-    pub representation: KernelStructureGraph,
     pub program: Option<Program>,
-    pub confidence: f32,
-    pub success_count: u64,
-    pub total_attempts: u64,
+    pub cost: f64,
+    pub success_count: u32,
+    pub total_attempts: u32,
 }
 
 impl Hypothesis {
-    pub fn new(name: String, representation: KernelStructureGraph) -> Self {
-        Self {
-            representation_name: name,
-            representation,
-            program: None,
-            confidence: 0.5,
-            success_count: 0,
-            total_attempts: 0,
-        }
+    pub fn new(representation_name: String, program: Option<Program>, cost: f64) -> Self {
+        Self { representation_name, program, cost, success_count: 0, total_attempts: 0 }
     }
-
+    pub fn success_rate(&self) -> f64 {
+        if self.total_attempts == 0 { 0.0 } else { self.success_count as f64 / self.total_attempts as f64 }
+    }
     pub fn score(&self) -> f64 {
-        let program_bonus = if self.program.is_some() { 0.5 } else { 0.0 };
-        let success_rate = if self.total_attempts > 0 {
-            self.success_count as f64 / self.total_attempts as f64
-        } else {
-            0.5
-        };
-        (self.confidence as f64 + success_rate) / 2.0 + program_bonus
-    }
-
-    pub fn record_success(&mut self) {
-        self.success_count += 1;
-        self.total_attempts += 1;
-        self.confidence = (self.confidence + 0.1).min(1.0);
-        if let Some(ref mut program) = self.program {
-            program.record_success();
-        }
-    }
-
-    pub fn record_failure(&mut self) {
-        self.total_attempts += 1;
-        self.confidence = (self.confidence - 0.05).max(0.0);
-        if let Some(ref mut program) = self.program {
-            program.record_failure();
-        }
+        let sr = self.success_rate();
+        if sr > 0.0 { sr / self.cost.max(0.001) } else { 1.0 / self.cost.max(0.001) }
     }
 }
 
 pub struct HypothesisManager {
     pub hypotheses: Vec<Hypothesis>,
-    pub representation_stats: HashMap<String, (u64, u64)>,
-    pub cost_weights: HashMap<String, f64>,
+    factory: RepresentationFactory,
 }
 
 impl HypothesisManager {
     pub fn new() -> Self {
-        let mut cost_weights = HashMap::new();
-        cost_weights.insert("Translate".into(), 1.0);
-        cost_weights.insert("Recolor".into(), 1.0);
-        cost_weights.insert("Delete".into(), 1.5);
-        cost_weights.insert("Create".into(), 2.0);
-        cost_weights.insert("Merge".into(), 2.5);
-        cost_weights.insert("Split".into(), 3.0);
-
-        Self {
-            hypotheses: Vec::new(),
-            representation_stats: HashMap::new(),
-            cost_weights,
-        }
+        Self { hypotheses: Vec::new(), factory: RepresentationFactory::new() }
     }
-
     pub fn process_grid(
         &mut self,
         grid: &ArcGrid,
         synthesizer: &mut ProgramSynthesizer,
-        target: Option<&KernelStructureGraph>,
+        target_ksg: Option<&KernelStructureGraph>,
     ) {
-        let representations = RepresentationFactory::all_representations(grid);
+        let reps = self.factory.build_all(grid);
         self.hypotheses.clear();
-
-        for (name, rep) in representations {
-            let mut hypothesis = Hypothesis::new(name.clone(), rep.clone());
-
-            if let Some(target_graph) = target {
-                if let Some(program) = synthesizer.find_best_program(&rep, target_graph) {
-                    hypothesis.program = Some(program.clone());
+        for rep in reps {
+            let mut program = None;
+            let mut cost = 1.0_f64;
+            if let Some(target) = target_ksg {
+                if let Some(p) = synthesizer.learn_from_example(&rep.graph, target) {
+                    cost = p.cost();
+                    program = Some(p);
                 }
             }
-
-            if let Some(&(successes, attempts)) = self.representation_stats.get(&name) {
-                if attempts > 0 {
-                    hypothesis.confidence = successes as f32 / attempts as f32;
-                    hypothesis.success_count = successes;
-                    hypothesis.total_attempts = attempts;
-                }
-            }
-
-            self.hypotheses.push(hypothesis);
+            self.hypotheses.push(Hypothesis::new(rep.name, program, cost));
         }
-
-        self.hypotheses.sort_by(|a, b| {
-            b.score().partial_cmp(&a.score()).unwrap_or(std::cmp::Ordering::Equal)
-        });
+        self.hypotheses.sort_by(|a, b| a.cost.partial_cmp(&b.cost).unwrap_or(std::cmp::Ordering::Equal));
     }
-
     pub fn best_hypothesis(&self) -> Option<&Hypothesis> {
-        self.hypotheses.iter().filter(|h| h.program.is_some()).next()
+        self.hypotheses.first()
     }
-
-    pub fn top_n(&self, n: usize) -> Vec<&Hypothesis> {
-        self.hypotheses.iter().take(n).collect()
+    pub fn best_representation_name(&self) -> Option<String> {
+        self.best_hypothesis().map(|h| h.representation_name.clone())
     }
-
-    pub fn record_success(&mut self, representation_name: &str) {
-        if let Some(h) = self.hypotheses.iter_mut().find(|h| h.representation_name == representation_name) {
-            h.record_success();
+    pub fn record_success(&mut self, rep_name: &str) {
+        if let Some(h) = self.hypotheses.iter_mut().find(|h| h.representation_name == rep_name) {
+            h.success_count += 1; h.total_attempts += 1;
         }
-        let stats = self.representation_stats.entry(representation_name.to_string()).or_insert((0, 0));
-        stats.0 += 1;
-        stats.1 += 1;
     }
-
-    pub fn record_failure(&mut self, representation_name: &str) {
-        if let Some(h) = self.hypotheses.iter_mut().find(|h| h.representation_name == representation_name) {
-            h.record_failure();
+    pub fn record_failure(&mut self, rep_name: &str) {
+        if let Some(h) = self.hypotheses.iter_mut().find(|h| h.representation_name == rep_name) {
+            h.total_attempts += 1;
         }
-        let stats = self.representation_stats.entry(representation_name.to_string()).or_insert((0, 0));
-        stats.1 += 1;
     }
-
-    pub fn best_representation_name(&self) -> Option<&str> {
-        self.best_hypothesis().map(|h| h.representation_name.as_str())
-    }
-
-    pub fn best_representation(&self) -> Option<&KernelStructureGraph> {
-        self.best_hypothesis().map(|h| &h.representation)
-    }
-
-    pub fn best_program(&self) -> Option<&Program> {
-        self.best_hypothesis().and_then(|h| h.program.as_ref())
-    }
-
-    pub fn program_cost(&self, program: &Program) -> f64 {
-        program.steps.iter().map(|step| {
-            let op_name = match step {
-                crate::sandbox::operators::Transformation::Translate { .. } => "Translate",
-                crate::sandbox::operators::Transformation::Recolor { .. } => "Recolor",
-                crate::sandbox::operators::Transformation::Delete { .. } => "Delete",
-                crate::sandbox::operators::Transformation::Create { .. } => "Create",
-                crate::sandbox::operators::Transformation::Merge { .. } => "Merge",
-                crate::sandbox::operators::Transformation::Split { .. } => "Split",
-                crate::sandbox::operators::Transformation::NoOp => "NoOp",
-                crate::sandbox::operators::Transformation::RecolorToTarget { .. } => "RecolorToTarget",
-                crate::sandbox::operators::Transformation::TranslateToTarget { .. } => "TranslateToTarget",
-                crate::sandbox::operators::Transformation::Rotate { .. } => "Rotate",
-            };
-            self.cost_weights.get(op_name).copied().unwrap_or(1.0)
-        }).sum()
+    pub fn program_cost(&self, _program: &Program) -> f64 {
+        self.hypotheses.first().map(|h| h.cost).unwrap_or(1.0)
     }
 }
