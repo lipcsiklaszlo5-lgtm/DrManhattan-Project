@@ -7,6 +7,7 @@ pub mod candidate;
 pub mod telemetry;
 pub mod executor;
 pub mod schema;
+pub mod sandbox;
 
 pub use task::{Task, TaskBuilder, TaskContext};
 pub use structure::KernelStructureGraph;
