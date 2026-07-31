@@ -16,3 +16,4 @@ pub mod abstraction;
 pub mod hypothesis_bus;
 pub mod concept;
 pub mod meta_learner;
+pub mod concept_learner;

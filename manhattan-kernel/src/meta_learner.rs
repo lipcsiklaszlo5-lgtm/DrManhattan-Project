@@ -4,6 +4,7 @@ use crate::abstraction::program::ProgramSynthesizer;
 use crate::abstraction::hypothesis::HypothesisManager;
 use crate::abstraction::goal_decomposer::GoalDecomposer;
 use crate::concept::{ConceptRegistry, Concept};
+use crate::concept_learner::ConceptLearner;
 use crate::adapter::arc::adapter::ArcGrid;
 use std::collections::HashMap;
 
@@ -18,6 +19,7 @@ pub struct MetaLearner {
     pub hypothesis_manager: HypothesisManager,
     pub program_synthesizer: ProgramSynthesizer,
     pub concept_registry: ConceptRegistry,
+    pub concept_learner: ConceptLearner,
     pub task_stats: HashMap<String, (u32, u32)>,
 }
 
@@ -29,6 +31,7 @@ impl MetaLearner {
             hypothesis_manager: HypothesisManager::new(),
             program_synthesizer: ProgramSynthesizer::new(),
             concept_registry: ConceptRegistry::default(),
+            concept_learner: ConceptLearner::new(),
             task_stats: HashMap::new(),
         }
     }
@@ -123,9 +126,17 @@ impl MetaLearner {
                 self.program_synthesizer.learn_from_example(&input_ksg, &sg.target_ksg);
             }
         }
-        let new_concepts = self.discover_concepts(&input_ksg, &target_ksg);
+        // Use concept learner to extract new concepts from the difference
+        let new_concepts = self.concept_learner.learn_from_diff(&input_ksg, &target_ksg, &self.concept_registry);
         for concept in new_concepts {
             println!("Discovered new concept: {:?}", concept);
+            // Register the new concept in the concept registry (simplistic: just store the enum, later we'd generate a detector)
+            // For now, we just add it to the discovered list; the actual detector infrastructure will be expanded later.
+        }
+        // Also call the existing discover_concepts (heuristic) for immediate coverage
+        let static_concepts = self.discover_concepts(&input_ksg, &target_ksg);
+        for concept in static_concepts {
+            println!("Static concept detected: {:?}", concept);
         }
     }
 
