@@ -14,6 +14,7 @@ use crate::executor::LlmExecutor;
 use crate::schema::index::SchemaIndex;
 use crate::abstraction::hypothesis::HypothesisManager;
 use crate::abstraction::program::{Program, ProgramSynthesizer};
+use crate::abstraction::goal_decomposer::GoalDecomposer;
 use crate::adapter::arc::ArcAdapter;
 use crate::sandbox::operators::Transformation;
 use std::path::Path;
@@ -199,6 +200,7 @@ impl<'a> PolicyEngine<'a> {
                     let input_ksg = task.context.structure.as_ref().unwrap().clone();
                     let target_ksg = ArcAdapter::grid_to_ksg(target_grid);
 
+                    // Először próbáljuk meg közvetlenül a Hypothesis Manager-rel
                     self.hypothesis_manager.process_grid(grid, &mut self.program_synthesizer, Some(&target_ksg));
 
                     let hypothesis_data = self.hypothesis_manager.best_hypothesis().map(|h| {
@@ -220,6 +222,61 @@ impl<'a> PolicyEngine<'a> {
                             success = true;
                         } else {
                             self.hypothesis_manager.record_failure(&rep_name);
+                        }
+                    }
+
+                    // Ha a közvetlen program nem működött, próbáljuk meg a Goal Decomposer-rel
+                    if !success {
+                        let subgoals = GoalDecomposer::decompose(&input_ksg, &target_ksg);
+                        if !subgoals.is_empty() {
+                            println!("Decomposed into {} subgoals", subgoals.len());
+                            let mut current_grid = grid.clone();
+                            let mut all_solved = true;
+
+                            for sg in &subgoals {
+                                let sg_target_grid = ArcAdapter::ksg_to_grid(&sg.target_ksg, target_grid.width, target_grid.height, 0);
+
+                                // Tanítsuk be a részcélhoz szükséges programot
+                                let current_ksg = ArcAdapter::grid_to_ksg(&current_grid);
+                                let sg_ksg = ArcAdapter::grid_to_ksg(&sg_target_grid);
+                                self.program_synthesizer.learn_from_example(&current_ksg, &sg_ksg);
+
+                                // Próbáljuk megoldani a részcél-t
+                                self.hypothesis_manager.process_grid(&current_grid, &mut self.program_synthesizer, Some(&sg_ksg));
+
+                                let sg_hypothesis_data = self.hypothesis_manager.best_hypothesis().map(|h| {
+                                    (h.representation_name.clone(), h.program.clone())
+                                });
+
+                                if let Some((sg_rep_name, Some(sg_program))) = sg_hypothesis_data {
+                                    let resolved = Self::resolve_abstract_program(&sg_program, &sg_ksg);
+                                    let resolved_prog = Program::new(resolved);
+                                    let result_graph = resolved_prog.apply(&current_ksg);
+                                    let result_grid = ArcAdapter::ksg_to_grid(&result_graph, target_grid.width, target_grid.height, 0);
+
+                                    if result_grid.pixels == sg_target_grid.pixels {
+                                        self.hypothesis_manager.record_success(&sg_rep_name);
+                                        current_grid = sg_target_grid;
+                                        println!("Subgoal solved: {}", sg.description);
+                                    } else {
+                                        self.hypothesis_manager.record_failure(&sg_rep_name);
+                                        all_solved = false;
+                                        break;
+                                    }
+                                } else {
+                                    all_solved = false;
+                                    break;
+                                }
+                            }
+
+                            if all_solved {
+                                // Ellenőrizzük, hogy a végső rács egyezik-e a céllal
+                                if current_grid.pixels == target_grid.pixels {
+                                    telemetry.record_local_search_success();
+                                    result = "ARC solved via subgoals".to_string();
+                                    success = true;
+                                }
+                            }
                         }
                     }
                 }
