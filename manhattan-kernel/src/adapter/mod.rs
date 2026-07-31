@@ -26,7 +26,7 @@ pub trait DomainAdapter {
     fn build_structure(&self, task: &Task) -> KernelStructureGraph;
     fn validate(&self, structure: &KernelStructureGraph, candidate: &str) -> Result<(), ValidationError>;
     fn available_algorithms(&self) -> Vec<Algorithm>;
-    fn graph_to_code(&self, graph: &KernelStructureGraph, original_code: &str) -> String {
+    fn graph_to_code(&self, graph: &KernelStructureGraph, _original_code: &str) -> String {
         format!("{:?}", graph)
     }
 }

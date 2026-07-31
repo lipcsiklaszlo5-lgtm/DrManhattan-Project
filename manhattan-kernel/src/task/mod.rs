@@ -11,6 +11,7 @@ use std::path::PathBuf;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use crate::structure::KernelStructureGraph;
+use crate::adapter::arc::adapter::ArcGrid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Task {
@@ -31,6 +32,8 @@ pub struct TaskContext {
     pub files: Vec<PathBuf>,
     pub history: Vec<TaskId>,
     pub structure: Option<KernelStructureGraph>,
+    pub grid: Option<ArcGrid>,
+    pub target_grid: Option<ArcGrid>,
 }
 
 impl Task {

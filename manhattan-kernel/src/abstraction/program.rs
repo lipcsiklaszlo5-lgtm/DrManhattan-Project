@@ -82,12 +82,35 @@ impl ProgramSynthesizer {
         Some(program)
     }
 
-    pub fn find_best_program(&self, graph: &KernelStructureGraph, target: &KernelStructureGraph) -> Option<&Program> {
-        self.programs.iter()
-            .filter(|p| {
-                let result = p.apply(graph);
-                result.nodes.len() == target.nodes.len()
-            })
-            .max_by(|a, b| a.confidence.partial_cmp(&b.confidence).unwrap())
+    pub fn find_best_program(&mut self, graph: &KernelStructureGraph, target: &KernelStructureGraph) -> Option<&Program> {
+        // Ha van már illeszkedő programunk, azt használjuk
+        let has_match = self.programs.iter().any(|p| {
+            let result = p.apply(graph);
+            result.nodes.len() == target.nodes.len() // Egyszerű ellenőrzés, bővíthető tartalomra is
+        });
+
+        if !has_match {
+            // Folyékony intelligencia: ha nincs kész program, tanuljunk a példából!
+            if let Some(learned) = self.learn_from_example(graph, target) {
+                self.programs.push(learned);
+            }
+        }
+
+        // Visszaadjuk a legmagasabb konfidenciájú érvényes programot
+        let mut best_idx: Option<usize> = None;
+        let mut max_conf = -1.0;
+        
+        for (i, p) in self.programs.iter().enumerate() {
+            let result = p.apply(graph);
+            // Szigorúbb ellenőrzés: egyezzen meg a csomópontok száma
+            if result.nodes.len() == target.nodes.len() {
+                if p.confidence > max_conf {
+                    max_conf = p.confidence;
+                    best_idx = Some(i);
+                }
+            }
+        }
+        
+        best_idx.map(|idx| &self.programs[idx])
     }
 }

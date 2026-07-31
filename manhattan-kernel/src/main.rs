@@ -4,7 +4,7 @@ use manhattan_kernel::policy::{CostModel, PolicyEngine};
 use manhattan_kernel::candidate::CandidateGenerator;
 use manhattan_kernel::telemetry::Telemetry;
 use std::env;
-use std::io::{self, Read};
+use std::io::{self};
 
 fn main() -> io::Result<()> {
     let args: Vec<String> = env::args().collect();

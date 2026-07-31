@@ -1,7 +1,9 @@
+use serde::{Serialize, Deserialize};
 use crate::structure::KernelStructureGraph;
 use std::collections::{HashMap, VecDeque};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Serialize, Deserialize)]
 pub struct ArcGrid {
     pub width: u8,
     pub height: u8,

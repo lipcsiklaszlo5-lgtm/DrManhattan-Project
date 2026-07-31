@@ -17,3 +17,11 @@ rand = "0.8"
 
 [dev-dependencies]
 pretty_assertions = "1"
+
+[[test]]
+name = "arc_e2e"
+path = "tests/arc_e2e_test.rs"
+
+[[test]]
+name = "arc_hypothesis"
+path = "tests/arc_hypothesis_test.rs"

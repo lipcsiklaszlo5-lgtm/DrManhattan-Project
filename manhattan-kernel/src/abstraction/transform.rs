@@ -1,5 +1,4 @@
 use crate::sandbox::operators::Transformation;
-use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
 pub struct TransformRule {

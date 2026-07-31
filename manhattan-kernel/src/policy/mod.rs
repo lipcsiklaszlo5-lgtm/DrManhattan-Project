@@ -12,7 +12,9 @@ use crate::memory::procedural::ProceduralRule;
 use crate::memory::loader::load_schemas;
 use crate::executor::LlmExecutor;
 use crate::schema::index::SchemaIndex;
-use crate::schema::composer::SchemaComposer;
+use crate::abstraction::hypothesis::HypothesisManager;
+use crate::abstraction::program::{Program, ProgramSynthesizer};
+use crate::adapter::arc::ArcAdapter;
 use std::path::Path;
 
 #[derive(Debug, Clone)]
@@ -32,6 +34,8 @@ pub struct PolicyEngine<'a> {
     semantic_schemas: HashMap<uuid::Uuid, SemanticSchema>,
     schema_index: SchemaIndex,
     llm_executor: Option<&'a LlmExecutor>,
+    pub hypothesis_manager: HypothesisManager,
+    pub program_synthesizer: ProgramSynthesizer,
 }
 
 impl<'a> PolicyEngine<'a> {
@@ -39,6 +43,8 @@ impl<'a> PolicyEngine<'a> {
         Self {
             cost_model, candidate_gen, rules: HashMap::new(), episodic_log: Vec::new(),
             semantic_schemas: HashMap::new(), schema_index: SchemaIndex::new(), llm_executor: None,
+            hypothesis_manager: HypothesisManager::new(),
+            program_synthesizer: ProgramSynthesizer::new(),
         }
     }
 
@@ -51,7 +57,7 @@ impl<'a> PolicyEngine<'a> {
 
     fn check_cache(&self, structure: &KernelStructureGraph) -> Option<&ProceduralRule> { self.rules.get(&structure.fingerprint()) }
     fn store_rule(&mut self, structure: &KernelStructureGraph, solution: &str) {
-        let mut rule = ProceduralRule { id: uuid::Uuid::new_v4(), pattern: solution.to_string(), confidence: 0.5, success_count: 1, domain_tags: vec!["compiler".into()] };
+        let mut rule = ProceduralRule { id: uuid::Uuid::new_v4(), pattern: solution.to_string(), confidence: 0.5, success_count: 1, domain_tags: vec!["arc".into()] };
         rule.record_success();
         self.rules.insert(structure.fingerprint(), rule);
     }
@@ -60,6 +66,7 @@ impl<'a> PolicyEngine<'a> {
     fn record_episodic(&mut self, task: &Task, success: bool, notes: &str) {
         self.episodic_log.push(EpisodicEntry { id: uuid::Uuid::new_v4(), task_intent: task.intent.clone(), success, timestamp: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs(), notes: notes.to_string() });
     }
+
     fn store_semantic_schema(&mut self, structure: &KernelStructureGraph, _solution: &str, _action: &str) {
         let fp = structure.fingerprint();
         let mut schema = SemanticSchema::new(structure.clone());
@@ -71,18 +78,8 @@ impl<'a> PolicyEngine<'a> {
         self.semantic_schemas.insert(schema.id, schema);
     }
 
-    fn extract_predicates(&self, structure: &KernelStructureGraph) -> Vec<Predicate> {
-        let mut preds = Vec::new();
-        for node in &structure.nodes {
-            if node.node_type == "arc_object" { preds.push(Predicate::TypeMismatch); }
-        }
-        preds
-    }
-
-    /// Kulcsfontosságú új metódus: transzformációs szabály kinyerése példákból
     pub fn learn_transformation(&mut self, before: &KernelStructureGraph, after: &KernelStructureGraph) -> Vec<NodeTransformation> {
         let diffs = graph_diff(before, after);
-        // A sikeres transzformációkat eltároljuk sémaként
         let fp = before.fingerprint();
         let mut schema = SemanticSchema::new(before.clone());
         schema.metadata.tags = vec!["arc".into()];
@@ -95,12 +92,15 @@ impl<'a> PolicyEngine<'a> {
     }
 
     pub fn decide(&self, task: &Task, _adapter: &dyn DomainAdapter) -> &str {
+        if task.context.grid.is_some() {
+            return "schema_plan";
+        }
         if task.context.structure.is_some() {
             if let Some(s) = &task.context.structure {
                 if s.nodes.is_empty() && s.edges.is_empty() { return "success"; }
                 if self.check_cache(s).is_some() { return "cache"; }
             }
-            return "schema_plan";
+            return "algorithm";
         }
         if self.cost_model.estimate_llm_cost(task) < 0.02 { return "llm"; }
         "llm"
@@ -124,7 +124,15 @@ impl<'a> PolicyEngine<'a> {
 
     pub fn execute_task(&mut self, task: &mut Task, adapter: &dyn DomainAdapter, telemetry: &mut Telemetry) -> Result<String, String> {
         let original_code = task.intent.clone();
-        if task.context.structure.is_none() { task.context.structure = Some(adapter.build_structure(task)); }
+
+        if task.context.structure.is_none() {
+            if let Some(ref grid) = task.context.grid {
+                task.context.structure = Some(ArcAdapter::grid_to_ksg(grid));
+            } else {
+                task.context.structure = Some(adapter.build_structure(task));
+            }
+        }
+
         let path = self.decide(task, adapter);
         let mut result = String::new();
         let mut success = false;
@@ -147,26 +155,56 @@ impl<'a> PolicyEngine<'a> {
                     } else { telemetry.record_llm_call(100, 200); result = "llm fallback (cache miss, no executor)".to_string(); }
                 }
             }
+            "algorithm" => {
+                let structure = task.context.structure.as_ref().unwrap().clone();
+                if let Some(solution) = self.run_local_search(&structure, adapter, &original_code, 5) {
+                    telemetry.record_local_search_success();
+                    result = solution;
+                    success = true;
+                } else {
+                    if let Some(ex) = self.llm_executor {
+                        if let Ok(o) = ex.execute(task) {
+                            telemetry.record_llm_call(o.confidence as u64, 200);
+                            if let Some(s) = &task.context.structure { if adapter.validate(s, &o.content).is_ok() { self.store_rule(s, &o.content); self.store_semantic_schema(s, &o.content, "llm"); result = o.content; success = true; } }
+                            if !success { result = "llm response failed validation".to_string(); }
+                        } else { result = "llm executor error".to_string(); }
+                    } else { telemetry.record_llm_call(100, 200); result = "llm fallback solution".to_string(); }
+                }
+            }
             "schema_plan" => {
-                if let Some(structure) = &task.context.structure.clone() {
-                    let predicates = self.extract_predicates(structure);
-                    if !predicates.is_empty() {
-                        let composer = SchemaComposer::new(self.schema_index.clone(), self.semantic_schemas.clone());
-                        let plan = composer.compose(&predicates);
-                        if !plan.is_empty() {
-                            if let Some(step) = plan.first() {
-                                if let Some(schema) = self.semantic_schemas.get(&step.schema_id) {
-                                    let code = adapter.graph_to_code(&schema.graph, &original_code);
-                                    if adapter.validate(structure, &code).is_ok() { telemetry.record_local_search_success(); self.store_rule(structure, &code); result = code; success = true; }
-                                }
-                            }
+                if let (Some(ref grid), Some(ref target_grid)) = (&task.context.grid, &task.context.target_grid) {
+                    let input_ksg = task.context.structure.as_ref().unwrap().clone();
+                    let target_ksg = ArcAdapter::grid_to_ksg(target_grid);
+                    
+                    self.hypothesis_manager.process_grid(grid, &mut self.program_synthesizer, Some(&target_ksg));
+                    
+                    // Klónozzuk a hipotézis adatait, mielőtt bármit módosítanánk
+                    let best_program_clone = self.hypothesis_manager.best_program().cloned();
+                    let rep_name = self.hypothesis_manager.best_representation_name().map(|s| s.to_string());
+                    
+                    if let (Some(program), Some(name)) = (best_program_clone, rep_name) {
+                        let result_graph = program.apply(&input_ksg);
+                        let result_grid = ArcAdapter::ksg_to_grid(&result_graph, target_grid.width, target_grid.height, 0);
+                        
+                        if result_grid.pixels == target_grid.pixels {
+                            telemetry.record_local_search_success();
+                            self.store_rule(&input_ksg, &format!("{:?}", program.steps));
+                            self.hypothesis_manager.record_success(&name);
+                            result = format!("ARC solved with program: {:?}", program.steps);
+                            success = true;
+                        } else {
+                            self.hypothesis_manager.record_failure(&name);
                         }
                     }
                 }
+                
                 if !success {
                     let structure = task.context.structure.as_ref().unwrap().clone();
-                    if let Some(solution) = self.run_local_search(&structure, adapter, &original_code, 5) { telemetry.record_local_search_success(); result = solution; success = true; }
-                    else {
+                    if let Some(solution) = self.run_local_search(&structure, adapter, &original_code, 5) {
+                        telemetry.record_local_search_success();
+                        result = solution;
+                        success = true;
+                    } else {
                         if let Some(ex) = self.llm_executor {
                             if let Ok(o) = ex.execute(task) {
                                 telemetry.record_llm_call(o.confidence as u64, 200);
