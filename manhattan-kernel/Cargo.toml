@@ -25,3 +25,15 @@ path = "tests/arc_e2e_test.rs"
 [[test]]
 name = "arc_hypothesis"
 path = "tests/arc_hypothesis_test.rs"
+
+[[test]]
+name = "arc_translate_recolor"
+path = "tests/arc_translate_recolor_test.rs"
+
+[[test]]
+name = "unit_program_synthesizer"
+path = "tests/unit_program_synthesizer_test.rs"
+
+[[test]]
+name = "arc_multi_op"
+path = "tests/arc_multi_op_test.rs"

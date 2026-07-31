@@ -45,7 +45,7 @@ impl ProgramSynthesizer {
     }
 
     pub fn learn_from_example(&mut self, before: &KernelStructureGraph, after: &KernelStructureGraph) -> Option<Program> {
-        let diffs = graph_diff(before, after);
+        let diffs: Vec<_> = graph_diff(before, after).into_iter().filter(|d| !matches!(d, NodeTransformation::Unchanged { .. })).collect();
         if diffs.is_empty() { return None; }
 
         let mut steps = Vec::new();
