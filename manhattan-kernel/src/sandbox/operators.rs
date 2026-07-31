@@ -3,15 +3,15 @@ use std::collections::HashMap;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Transformation {
-    RecolorToTarget { node_id: String },
-    TranslateToTarget { node_id: String },
-    Rotate { node_id: String, angle: u16 },
     Translate { node_id: String, dx: i64, dy: i64 },
     Recolor { node_id: String, new_color: String },
     Delete { node_id: String },
     Create { color: String, bbox_x: u64, bbox_y: u64, bbox_w: u8, bbox_h: u8 },
     Merge { node_a: String, node_b: String },
     Split { node_id: String },
+    RecolorToTarget { node_id: String },
+    TranslateToTarget { node_id: String },
+    Rotate { node_id: String, angle: u16 },
     NoOp,
 }
 
@@ -52,8 +52,6 @@ pub fn apply_transformation(graph: &KernelStructureGraph, transform: &Transforma
             attrs.insert("bbox_w".to_string(), bbox_w.to_string());
             attrs.insert("bbox_h".to_string(), bbox_h.to_string());
             attrs.insert("area".to_string(), ((*bbox_w as u64) * (*bbox_h as u64)).to_string());
-            
-            // shape_mask generálása: a bounding box minden pixelét kitöltjük
             let mut shape_mask = Vec::new();
             for dx in 0..*bbox_w {
                 for dy in 0..*bbox_h {
@@ -61,7 +59,6 @@ pub fn apply_transformation(graph: &KernelStructureGraph, transform: &Transforma
                 }
             }
             attrs.insert("shape_mask".to_string(), shape_mask.join(";"));
-            
             new_graph.add_node(&node_id, "arc_object");
             if let Some(node) = new_graph.nodes.last_mut() {
                 node.attributes = attrs;
@@ -71,7 +68,6 @@ pub fn apply_transformation(graph: &KernelStructureGraph, transform: &Transforma
             let b_attrs = new_graph.nodes.iter()
                 .find(|n| &n.id == node_b)
                 .map(|n| n.attributes.clone());
-            
             if let Some(b_attr) = b_attrs {
                 if let Some(node_a) = new_graph.nodes.iter_mut().find(|n| &n.id == node_a) {
                     if let (Some(ax), Some(ay), Some(aw), Some(ah), Some(bx), Some(by), Some(bw), Some(bh)) = (
@@ -131,21 +127,45 @@ pub fn apply_transformation(graph: &KernelStructureGraph, transform: &Transforma
                 new_graph.edges.retain(|e| &e.from != node_id && &e.to != node_id);
             }
         }
-        Transformation::NoOp => {}
-        Transformation::RecolorToTarget { .. } => { /* absztrakt operátor, a PolicyEngine oldja fel */ }
-        Transformation::TranslateToTarget { .. } => { /* absztrakt operátor, a PolicyEngine oldja fel */ }
+        Transformation::RecolorToTarget { .. } | Transformation::TranslateToTarget { .. } => {
+            // Absztrakt operátorok, a PolicyEngine oldja fel
+        }
         Transformation::Rotate { node_id, angle } => {
             if let Some(node) = new_graph.nodes.iter_mut().find(|n| n.id == *node_id) {
-                if let (Some(w_str), Some(h_str)) = (node.attributes.get("bbox_w").cloned(), node.attributes.get("bbox_h").cloned()) {
+                if let (Some(w_str), Some(h_str)) = (
+                    node.attributes.get("bbox_w").cloned(),
+                    node.attributes.get("bbox_h").cloned(),
+                ) {
                     if let (Ok(w), Ok(h)) = (w_str.parse::<u8>(), h_str.parse::<u8>()) {
                         if *angle == 90 || *angle == 270 {
+                            // Bbox csere
                             node.attributes.insert("bbox_w".to_string(), h.to_string());
                             node.attributes.insert("bbox_h".to_string(), w.to_string());
+                            
+                            // Shape_mask forgatása
+                            if let Some(mask_str) = node.attributes.get("shape_mask").cloned() {
+                                let mut new_mask = Vec::new();
+                                for part in mask_str.split(';') {
+                                    let mut coords = part.split(',');
+                                    if let (Some(dx_str), Some(dy_str)) = (coords.next(), coords.next()) {
+                                        if let (Ok(dx), Ok(dy)) = (dx_str.parse::<u8>(), dy_str.parse::<u8>()) {
+                                            // 90 fokos forgatás: (dx, dy) -> (dy, w - 1 - dx)
+                                            let new_dx = dy;
+                                            let new_dy = w - 1 - dx;
+                                            new_mask.push(format!("{},{}", new_dx, new_dy));
+                                        }
+                                    }
+                                }
+                                if !new_mask.is_empty() {
+                                    node.attributes.insert("shape_mask".to_string(), new_mask.join(";"));
+                                }
+                            }
                         }
                     }
                 }
             }
         }
+        Transformation::NoOp => {}
     }
     
     new_graph

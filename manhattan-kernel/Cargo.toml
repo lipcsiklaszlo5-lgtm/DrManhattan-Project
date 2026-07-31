@@ -53,3 +53,7 @@ path = "tests/unit_abstract_recolor_test.rs"
 [[test]]
 name = "unit_rotate"
 path = "tests/unit_rotate_test.rs"
+
+[[test]]
+name = "arc_compose"
+path = "tests/arc_compose_test.rs"
