@@ -741,3 +741,143 @@ impl Predicate for InsidePredicate {
     fn name(&self) -> &str { "InsidePredicate" }
     fn clone_box(&self) -> Box<dyn Predicate> { Box::new(InsidePredicate { reference: self.reference.clone_box() }) }
 }
+
+// --- Contains ---
+pub struct ContainsPredicate { pub reference: Box<dyn Predicate> }
+
+impl Predicate for ContainsPredicate {
+    fn evaluate(&self, graph: &KernelStructureGraph) -> PredicateResult {
+        let refs = self.reference.evaluate(graph).as_ranked_list();
+        if refs.is_empty() { return PredicateResult::Bool(false); }
+        let ref_ids: Vec<String> = refs.into_iter().map(|(id, _)| id).collect();
+        
+        let matching: Vec<(String, f32)> = graph.edges.iter()
+            .filter(|e| e.rel_type == "contains" && ref_ids.contains(&e.to))
+            .map(|e| (e.from.clone(), 1.0))
+            .collect();
+        
+        if matching.is_empty() { PredicateResult::Bool(false) } else { PredicateResult::RankedList(matching) }
+    }
+    fn name(&self) -> &str { "ContainsPredicate" }
+    fn clone_box(&self) -> Box<dyn Predicate> { Box::new(ContainsPredicate { reference: self.reference.clone_box() }) }
+}
+
+// --- Nearest ---
+pub struct NearestPredicate { pub reference: Box<dyn Predicate> }
+
+impl Predicate for NearestPredicate {
+    fn evaluate(&self, graph: &KernelStructureGraph) -> PredicateResult {
+        let refs = self.reference.evaluate(graph).as_ranked_list();
+        if refs.is_empty() { return PredicateResult::Bool(false); }
+        let ref_ids: Vec<String> = refs.into_iter().map(|(id, _)| id).collect();
+        
+        let ref_centers: Vec<(f64, f64)> = graph.nodes.iter()
+            .filter(|n| ref_ids.contains(&n.id))
+            .filter_map(|n| {
+                let x: f64 = n.attributes.get("bbox_x").and_then(|v| v.parse().ok())?;
+                let y: f64 = n.attributes.get("bbox_y").and_then(|v| v.parse().ok())?;
+                let w: f64 = n.attributes.get("bbox_w").and_then(|v| v.parse().ok()).unwrap_or(1.0);
+                let h: f64 = n.attributes.get("bbox_h").and_then(|v| v.parse().ok()).unwrap_or(1.0);
+                Some((x + w / 2.0, y + h / 2.0))
+            }).collect();
+        if ref_centers.is_empty() { return PredicateResult::Bool(false); }
+        let ref_cx = ref_centers.iter().map(|(x, _)| x).sum::<f64>() / ref_centers.len() as f64;
+        let ref_cy = ref_centers.iter().map(|(_, y)| y).sum::<f64>() / ref_centers.len() as f64;
+        
+        let mut scored: Vec<(String, f32)> = graph.nodes.iter()
+            .filter(|n| !ref_ids.contains(&n.id))
+            .filter_map(|n| {
+                let x: f64 = n.attributes.get("bbox_x").and_then(|v| v.parse().ok())?;
+                let y: f64 = n.attributes.get("bbox_y").and_then(|v| v.parse().ok())?;
+                let w: f64 = n.attributes.get("bbox_w").and_then(|v| v.parse().ok()).unwrap_or(1.0);
+                let h: f64 = n.attributes.get("bbox_h").and_then(|v| v.parse().ok()).unwrap_or(1.0);
+                let cx = x + w / 2.0;
+                let cy = y + h / 2.0;
+                let dist = ((cx - ref_cx).powi(2) + (cy - ref_cy).powi(2)).sqrt();
+                Some((n.id.clone(), 1.0 / (1.0 + dist as f32)))
+            }).collect();
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        if scored.is_empty() { PredicateResult::Bool(false) } else { PredicateResult::RankedList(scored) }
+    }
+    fn name(&self) -> &str { "NearestPredicate" }
+    fn clone_box(&self) -> Box<dyn Predicate> { Box::new(NearestPredicate { reference: self.reference.clone_box() }) }
+}
+
+// --- Farthest ---
+pub struct FarthestPredicate { pub reference: Box<dyn Predicate> }
+
+impl Predicate for FarthestPredicate {
+    fn evaluate(&self, graph: &KernelStructureGraph) -> PredicateResult {
+        let refs = self.reference.evaluate(graph).as_ranked_list();
+        if refs.is_empty() { return PredicateResult::Bool(false); }
+        let ref_ids: Vec<String> = refs.into_iter().map(|(id, _)| id).collect();
+        
+        let ref_centers: Vec<(f64, f64)> = graph.nodes.iter()
+            .filter(|n| ref_ids.contains(&n.id))
+            .filter_map(|n| {
+                let x: f64 = n.attributes.get("bbox_x").and_then(|v| v.parse().ok())?;
+                let y: f64 = n.attributes.get("bbox_y").and_then(|v| v.parse().ok())?;
+                let w: f64 = n.attributes.get("bbox_w").and_then(|v| v.parse().ok()).unwrap_or(1.0);
+                let h: f64 = n.attributes.get("bbox_h").and_then(|v| v.parse().ok()).unwrap_or(1.0);
+                Some((x + w / 2.0, y + h / 2.0))
+            }).collect();
+        if ref_centers.is_empty() { return PredicateResult::Bool(false); }
+        let ref_cx = ref_centers.iter().map(|(x, _)| x).sum::<f64>() / ref_centers.len() as f64;
+        let ref_cy = ref_centers.iter().map(|(_, y)| y).sum::<f64>() / ref_centers.len() as f64;
+        
+        let mut scored: Vec<(String, f32)> = graph.nodes.iter()
+            .filter(|n| !ref_ids.contains(&n.id))
+            .filter_map(|n| {
+                let x: f64 = n.attributes.get("bbox_x").and_then(|v| v.parse().ok())?;
+                let y: f64 = n.attributes.get("bbox_y").and_then(|v| v.parse().ok())?;
+                let w: f64 = n.attributes.get("bbox_w").and_then(|v| v.parse().ok()).unwrap_or(1.0);
+                let h: f64 = n.attributes.get("bbox_h").and_then(|v| v.parse().ok()).unwrap_or(1.0);
+                let cx = x + w / 2.0;
+                let cy = y + h / 2.0;
+                let dist = ((cx - ref_cx).powi(2) + (cy - ref_cy).powi(2)).sqrt();
+                Some((n.id.clone(), dist as f32 / 100.0))
+            }).collect();
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        if scored.is_empty() { PredicateResult::Bool(false) } else { PredicateResult::RankedList(scored) }
+    }
+    fn name(&self) -> &str { "FarthestPredicate" }
+    fn clone_box(&self) -> Box<dyn Predicate> { Box::new(FarthestPredicate { reference: self.reference.clone_box() }) }
+}
+
+// --- ObjectCount ---
+pub struct ObjectCountPredicate { pub min: usize, pub max: usize }
+
+impl Predicate for ObjectCountPredicate {
+    fn evaluate(&self, graph: &KernelStructureGraph) -> PredicateResult {
+        let count = graph.nodes.iter().filter(|n| n.node_type == "arc_object").count();
+        PredicateResult::Bool(count >= self.min && count <= self.max)
+    }
+    fn name(&self) -> &str { "ObjectCountPredicate" }
+    fn clone_box(&self) -> Box<dyn Predicate> { Box::new(ObjectCountPredicate { min: self.min, max: self.max }) }
+}
+
+// --- NeighbourCount ---
+pub struct NeighbourCountPredicate { pub reference: Box<dyn Predicate>, pub min: usize, pub max: usize }
+
+impl Predicate for NeighbourCountPredicate {
+    fn evaluate(&self, graph: &KernelStructureGraph) -> PredicateResult {
+        let refs = self.reference.evaluate(graph).as_ranked_list();
+        if refs.is_empty() { return PredicateResult::Bool(false); }
+        let ref_ids: Vec<String> = refs.into_iter().map(|(id, _)| id).collect();
+        
+        let matching: Vec<(String, f32)> = graph.nodes.iter()
+            .filter(|n| ref_ids.contains(&n.id))
+            .filter(|n| {
+                let count = graph.edges.iter()
+                    .filter(|e| (e.from == n.id || e.to == n.id) && e.rel_type == "touches")
+                    .count();
+                count >= self.min && count <= self.max
+            })
+            .map(|n| (n.id.clone(), 1.0))
+            .collect();
+        
+        if matching.is_empty() { PredicateResult::Bool(false) } else { PredicateResult::RankedList(matching) }
+    }
+    fn name(&self) -> &str { "NeighbourCountPredicate" }
+    fn clone_box(&self) -> Box<dyn Predicate> { Box::new(NeighbourCountPredicate { reference: self.reference.clone_box(), min: self.min, max: self.max }) }
+}

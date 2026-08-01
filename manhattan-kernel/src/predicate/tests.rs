@@ -89,7 +89,7 @@ mod predicate_tests {
 
         let not = NotPredicate { predicate: Box::new(ColorPredicate { color: "1".into() }) };
         if let PredicateResult::RankedList(list) = not.evaluate(&g) {
-            assert_eq!(list.len(), 1); // only node c
+            assert_eq!(list.len(), 1);
             assert_eq!(list[0].0, "c");
         } else { panic!("Expected RankedList"); }
     }
@@ -97,9 +97,9 @@ mod predicate_tests {
     #[test]
     fn test_connected_predicate() {
         let mut g = KernelStructureGraph::new();
-        g.add_node("a", "arc_object");
-        g.add_node("b", "arc_object");
-        g.add_node("c", "arc_object");
+        let _a = g.add_node("a", "arc_object");
+        let _b = g.add_node("b", "arc_object");
+        let _c = g.add_node("c", "arc_object");
         g.add_edge("a", "b", "touches");
         g.add_edge("b", "c", "touches");
         
@@ -117,8 +117,8 @@ mod predicate_tests {
     #[test]
     fn test_inside_predicate() {
         let mut g = KernelStructureGraph::new();
-        g.add_node("a", "arc_object");
-        g.add_node("b", "arc_object");
+        let _a = g.add_node("a", "arc_object");
+        let _b = g.add_node("b", "arc_object");
         g.add_edge("a", "b", "contains");
         
         if let Some(node) = g.nodes.iter_mut().find(|n| n.id == "a") {
@@ -128,6 +128,55 @@ mod predicate_tests {
         if let PredicateResult::RankedList(list) = pred.evaluate(&g) {
             assert_eq!(list.len(), 1);
             assert_eq!(list[0].0, "b");
+        } else { panic!("Expected RankedList"); }
+    }
+
+    #[test]
+    fn test_contains_predicate() {
+        let mut g = KernelStructureGraph::new();
+        let _a = g.add_node("a", "arc_object");
+        let _b = g.add_node("b", "arc_object");
+        g.add_edge("a", "b", "contains");
+        
+        if let Some(node) = g.nodes.iter_mut().find(|n| n.id == "b") {
+            node.attributes.insert("color".into(), "1".into());
+        }
+        let pred = ContainsPredicate { reference: Box::new(ColorPredicate { color: "1".into() }) };
+        if let PredicateResult::RankedList(list) = pred.evaluate(&g) {
+            assert_eq!(list.len(), 1);
+            assert_eq!(list[0].0, "a");
+        } else { panic!("Expected RankedList"); }
+    }
+
+    #[test]
+    fn test_object_count_predicate() {
+        let g = make_graph(vec![
+            ("a".into(), "arc_object", vec![("color", "1")]),
+            ("b".into(), "arc_object", vec![("color", "2")]),
+        ]);
+        let pred = ObjectCountPredicate { min: 2, max: 2 };
+        assert_eq!(pred.evaluate(&g), PredicateResult::Bool(true));
+    }
+
+    #[test]
+    fn test_neighbour_count_predicate() {
+        let mut g = KernelStructureGraph::new();
+        let _a = g.add_node("a", "arc_object");
+        let _b = g.add_node("b", "arc_object");
+        let _c = g.add_node("c", "arc_object");
+        g.add_edge("a", "b", "touches");
+        g.add_edge("a", "c", "touches");
+        
+        if let Some(node) = g.nodes.iter_mut().find(|n| n.id == "a") {
+            node.attributes.insert("color".into(), "1".into());
+        }
+        let pred = NeighbourCountPredicate {
+            reference: Box::new(ColorPredicate { color: "1".into() }),
+            min: 2, max: 2,
+        };
+        if let PredicateResult::RankedList(list) = pred.evaluate(&g) {
+            assert_eq!(list.len(), 1);
+            assert_eq!(list[0].0, "a");
         } else { panic!("Expected RankedList"); }
     }
 }

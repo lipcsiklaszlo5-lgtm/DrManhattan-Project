@@ -5,6 +5,7 @@ use crate::structure::KernelStructureGraph;
 
 /// A predikátum kiértékelésének eredménye.
 #[derive(Debug, Clone)]
+#[derive(PartialEq)]
 pub enum PredicateResult {
     Bool(bool),
     RankedList(Vec<(String, f32)>),
