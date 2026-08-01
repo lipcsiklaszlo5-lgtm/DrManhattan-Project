@@ -32,6 +32,19 @@ impl CostModel {
     pub fn estimate_llm_cost(&self, _task: &Task) -> f32 { self.llm_cost_per_call }
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct StrategyStats {
+    pub successes: u32,
+    pub failures: u32,
+}
+
+impl StrategyStats {
+    pub fn success_rate(&self) -> f64 {
+        let total = self.successes + self.failures;
+        if total == 0 { 0.5 } else { self.successes as f64 / total as f64 }
+    }
+}
+
 pub struct PolicyEngine<'a> {
     cost_model: CostModel,
     candidate_gen: CandidateGenerator,
@@ -45,6 +58,7 @@ pub struct PolicyEngine<'a> {
     pub program_synthesizer: ProgramSynthesizer,
     pub explorer: ExplorerAgent,
     pub concept_registry: ConceptRegistry,
+    pub strategy_stats: HashMap<String, StrategyStats>,
 }
 
 impl<'a> PolicyEngine<'a> {
@@ -57,6 +71,7 @@ impl<'a> PolicyEngine<'a> {
             program_synthesizer: ProgramSynthesizer::new(),
             explorer: ExplorerAgent::new(),
             concept_registry: ConceptRegistry::default(),
+            strategy_stats: HashMap::new(),
         }
     }
 
@@ -106,18 +121,42 @@ impl<'a> PolicyEngine<'a> {
     }
 
     pub fn decide(&self, task: &Task, _adapter: &dyn DomainAdapter) -> &str {
-        if task.context.grid.is_some() {
-            return "schema_plan";
-        }
-        if task.context.structure.is_some() {
-            if let Some(s) = &task.context.structure {
-                if s.nodes.is_empty() && s.edges.is_empty() { return "success"; }
-                if self.check_cache(s).is_some() { return "cache"; }
+        let available: Vec<&str> = if task.context.grid.is_some() {
+            vec!["schema_plan", "algorithm", "llm"]
+        } else if task.context.structure.is_some() {
+            let s = task.context.structure.as_ref().unwrap();
+            if s.nodes.is_empty() && s.edges.is_empty() {
+                vec!["success"]
+            } else {
+                let mut opts = vec!["cache", "algorithm", "llm"];
+                if self.check_cache(s).is_some() { opts.insert(0, "cache"); }
+                opts
             }
-            return "algorithm";
+        } else {
+            vec!["llm"]
+        };
+
+        // Ha van statisztika, adaptívan választunk; egyébként alapértelmezett sorrendet
+        if !self.strategy_stats.is_empty() {
+            available.iter()
+                .max_by(|a, b| {
+                    let key_a: &str = *a;
+                    let key_b: &str = *b;
+                    let rate_a = self.strategy_stats.get(key_a).map(|s| s.success_rate()).unwrap_or(0.5);
+                    let rate_b = self.strategy_stats.get(key_b).map(|s| s.success_rate()).unwrap_or(0.5);
+                    rate_a.partial_cmp(&rate_b).unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .unwrap_or(&"llm")
+        } else {
+            // Alapértelmezett preferencia: schema_plan, ha van grid; cache, ha van találat; algorithm; llm
+            if available.contains(&"schema_plan") {
+                &"schema_plan"
+            } else if available.contains(&"cache") {
+                &"cache"
+            } else {
+                available[0]
+            }
         }
-        if self.cost_model.estimate_llm_cost(task) < 0.02 { return "llm"; }
-        "llm"
     }
 
     pub fn run_local_search(&mut self, structure: &KernelStructureGraph, adapter: &dyn DomainAdapter, original_code: &str, max_candidates: usize) -> Option<String> {
@@ -125,12 +164,10 @@ impl<'a> PolicyEngine<'a> {
         self.record_operator_attempt(&action);
         let mut candidates = self.candidate_gen.generate(structure, max_candidates);
 
-        // Gyűjtsük össze az összes releváns fogalmat
         let mut concepts = Vec::new();
         if let Some(ref mut bus) = self.hypothesis_bus {
             concepts.extend(bus.get_hypotheses().into_iter().map(|h| h.concept.to_lowercase()));
         }
-        // A ConceptRegistry-ből is veszünk fogalmakat
         let reg_concepts: Vec<String> = self.concept_registry.scan(structure).iter().map(|c| format!("{:?}", c).to_lowercase()).collect();
         concepts.extend(reg_concepts);
 
@@ -179,6 +216,11 @@ impl<'a> PolicyEngine<'a> {
         }).collect()
     }
 
+    fn update_strategy_stats(&mut self, path: &str, success: bool) {
+        let entry = self.strategy_stats.entry(path.to_string()).or_default();
+        if success { entry.successes += 1; } else { entry.failures += 1; }
+    }
+
     pub fn execute_task(&mut self, task: &mut Task, adapter: &dyn DomainAdapter, telemetry: &mut Telemetry) -> Result<String, String> {
         let original_code = task.intent.clone();
 
@@ -190,11 +232,11 @@ impl<'a> PolicyEngine<'a> {
             }
         }
 
-        let path = self.decide(task, adapter);
+        let path = self.decide(task, adapter).to_string();
         let mut result = String::new();
         let mut success = false;
 
-        match path {
+        match path.as_str() {
             "success" => { result = "already correct".to_string(); success = true; }
             "cache" => {
                 if let Some(s) = &task.context.structure {
@@ -354,6 +396,7 @@ impl<'a> PolicyEngine<'a> {
             }
             _ => return Err("unknown path".into()),
         }
+        self.update_strategy_stats(&path, success);
         self.record_episodic(task, success, &result);
         if success { Ok(result) } else { Err(result) }
     }
