@@ -1,90 +1,87 @@
 use crate::adapter::arc::adapter::ArcGrid;
-use crate::adapter::arc::ArcAdapter;
-use crate::structure::KernelStructureGraph;
 use crate::sandbox::operators::Transformation;
-use crate::abstraction::program::Program;
-use crate::structure::SplitMix64;
+use rand::Rng;
 
 pub struct SyntheticArcGenerator {
-    seed: u64,
-    max_objects: usize,
-    max_operators: usize,
-    grid_size: u8,
+    rng: rand::rngs::ThreadRng,
 }
 
 impl SyntheticArcGenerator {
-    pub fn new(seed: u64, max_objects: usize, max_operators: usize, grid_size: u8) -> Self {
-        Self { seed, max_objects, max_operators, grid_size }
+    pub fn new() -> Self {
+        Self { rng: rand::thread_rng() }
     }
 
-    fn random_grid(&self, state: &mut SplitMix64) -> ArcGrid {
-        let mut pixels = vec![0u8; (self.grid_size as usize) * (self.grid_size as usize)];
-        let num_objects = state.next_u64() as usize % self.max_objects + 1;
-        for _ in 0..num_objects {
-            let color = (state.next_u64() % 9 + 1) as u8;
-            let w = (state.next_u64() % 3 + 1) as u8;
-            let h = (state.next_u64() % 3 + 1) as u8;
-            let x = state.next_u64() as usize % (self.grid_size as usize - w as usize + 1);
-            let y = state.next_u64() as usize % (self.grid_size as usize - h as usize + 1);
-            for dx in 0..w {
-                for dy in 0..h {
-                    let idx = (y + dy as usize) * self.grid_size as usize + (x + dx as usize);
-                    if idx < pixels.len() {
-                        pixels[idx] = color;
-                    }
-                }
+    /// Generál egy véletlenszerű ARC feladatot (input, target) és a hozzá tartozó transzformációkat.
+    pub fn generate_task(&mut self, width: u8, height: u8, num_objects: usize, num_operations: usize) -> (ArcGrid, ArcGrid, Vec<Transformation>) {
+        let mut pixels = vec![0u8; (width as usize) * (height as usize)];
+        let mut rng = &mut self.rng;
+        // Hozzunk létre véletlenszerű objektumokat
+        for i in 0..num_objects {
+            let x = rng.gen_range(0..width) as usize;
+            let y = rng.gen_range(0..height) as usize;
+            let color = rng.gen_range(1..=9) as u8;
+            pixels[y * width as usize + x] = color;
+        }
+
+        let input = ArcGrid::new(width, height, pixels);
+        let mut target = input.clone();
+        let mut operations = Vec::new();
+
+        // Alkalmazzunk véletlenszerű transzformációkat
+        for _ in 0..num_operations {
+            if target.pixels.iter().all(|&p| p == 0) { break; }
+            let op = self.random_operation(&target);
+            if let Some(new_grid) = crate::sandbox::operators::apply_transformation_to_grid(&target, &op) {
+                target = new_grid;
+                operations.push(op);
             }
         }
-        ArcGrid::new(self.grid_size, self.grid_size, pixels)
+
+        (input, target, operations)
     }
 
-    fn random_program(&self, state: &mut SplitMix64, node_id: &str) -> Program {
-        let num_steps = state.next_u64() as usize % self.max_operators + 1;
-        let mut steps = Vec::new();
-        for _ in 0..num_steps {
-            let op = state.next_u64() % 6;
-            match op {
-                0 => steps.push(Transformation::Recolor {
-                    node_id: node_id.to_string(),
-                    new_color: ((state.next_u64() % 9 + 1) as u8).to_string(),
-                }),
-                1 => steps.push(Transformation::Translate {
-                    node_id: node_id.to_string(),
-                    dx: (state.next_u64() as i64 % 3) - 1,
-                    dy: (state.next_u64() as i64 % 3) - 1,
-                }),
-                2 => steps.push(Transformation::Rotate {
-                    node_id: node_id.to_string(),
-                    angle: 90,
-                }),
-                3 => steps.push(Transformation::Delete {
-                    node_id: node_id.to_string(),
-                }),
-                4 => steps.push(Transformation::Create {
-                    color: ((state.next_u64() % 9 + 1) as u8).to_string(),
-                    bbox_x: state.next_u64() % self.grid_size as u64,
-                    bbox_y: state.next_u64() % self.grid_size as u64,
-                    bbox_w: (state.next_u64() % 2 + 1) as u8,
-                    bbox_h: (state.next_u64() % 2 + 1) as u8,
-                }),
-                _ => {} // NoOp vagy bármilyen más érték
-            }
+    fn random_operation(&mut self, grid: &ArcGrid) -> Transformation {
+        let mut rng = &mut self.rng;
+        let objects: Vec<_> = grid.pixels.iter()
+            .enumerate()
+            .filter(|(_, &c)| c != 0)
+            .map(|(i, &c)| (i, c))
+            .collect();
+        if objects.is_empty() {
+            return Transformation::NoOp;
         }
-        Program::new(steps)
-    }
-
-    pub fn generate_task(&self) -> (ArcGrid, ArcGrid, Program, KernelStructureGraph) {
-        let mut state = SplitMix64::new(self.seed);
-        let input_grid = self.random_grid(&mut state);
-        let input_ksg = ArcAdapter::grid_to_ksg(&input_grid);
-        let node_id = if let Some(node) = input_ksg.nodes.first() {
-            node.id.clone()
-        } else {
-            "obj_0".to_string()
-        };
-        let program = self.random_program(&mut state, &node_id);
-        let output_graph = program.apply(&input_ksg);
-        let output_grid = ArcAdapter::ksg_to_grid(&output_graph, self.grid_size, self.grid_size, 0);
-        (input_grid, output_grid, program, input_ksg)
+        let idx = rng.gen_range(0..objects.len());
+        let (pos, color) = objects[idx];
+        let x = (pos % grid.width as usize) as u8;
+        let y = (pos / grid.width as usize) as u8;
+        let node_id = format!("obj_{}", pos);
+        match rng.gen_range(0..5) {
+            0 => Transformation::Translate {
+                node_id,
+                dx: rng.gen_range(-2..=2) as i64,
+                dy: rng.gen_range(-2..=2) as i64,
+            },
+            1 => Transformation::Recolor {
+                node_id,
+                new_color: rng.gen_range(1..=9).to_string(),
+            },
+            2 => Transformation::Delete { node_id },
+            3 => Transformation::Create {
+                color: rng.gen_range(1..=9).to_string(),
+                bbox_x: (x as i64 + rng.gen_range(-1i64..=1)) as u64,
+                bbox_y: (y as i64 + rng.gen_range(-1i64..=1)) as u64,
+                bbox_w: 1,
+                bbox_h: 1,
+            },
+            4 => Transformation::Rotate {
+                node_id,
+                angle: match rng.gen_range(0..3) {
+                    0 => 90,
+                    1 => 180,
+                    _ => 270,
+                },
+            },
+            _ => Transformation::NoOp,
+        }
     }
 }

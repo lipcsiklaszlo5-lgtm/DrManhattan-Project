@@ -1,3 +1,4 @@
+use crate::adapter::arc::adapter::ArcGrid;
 use crate::structure::KernelStructureGraph;
 use std::collections::HashMap;
 
@@ -181,3 +182,10 @@ pub fn simulate_plan(graph: &KernelStructureGraph, plan: &[Transformation]) -> V
     states
 }
 
+
+/// Alkalmaz egy transzformációt egy ArcGrid-re (a KSG helyett közvetlenül).
+pub fn apply_transformation_to_grid(grid: &ArcGrid, transformation: &Transformation) -> Option<ArcGrid> {
+    let ksg = crate::adapter::arc::adapter::ArcAdapter::grid_to_ksg(grid);
+    let new_ksg = apply_transformation(&ksg, transformation);
+    Some(crate::adapter::arc::adapter::ArcAdapter::ksg_to_grid(&new_ksg, grid.width, grid.height, 0))
+}

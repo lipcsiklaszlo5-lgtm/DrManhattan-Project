@@ -63,7 +63,6 @@ impl MetaLearner {
                 if let Some(name) = rep_name {
                     self.hypothesis_manager.record_success(&name);
                 }
-                // Fogalomtanulás sikeres tanulás után is
                 self.analyze_and_adapt(&task.grid, &task.target);
                 let key = "agent_one_shot".to_string();
                 let entry = self.task_stats.entry(key).or_insert((0,0));

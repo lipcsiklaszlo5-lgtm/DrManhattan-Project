@@ -3,6 +3,7 @@ use crate::structure::topology::graph_diff;
 use crate::concept::{Concept, ConceptDetector, ConceptRegistry};
 use std::collections::HashMap;
 
+/// Egy dinamikusan generált detektor, ami egy adott színű csomópontot keres.
 struct ColorDetector {
     color: String,
     concept: Concept,
@@ -52,6 +53,7 @@ impl ConceptLearner {
                                 if !registry.scan(after).contains(&concept) {
                                     new_concepts.push(concept.clone());
                                     self.discovered.push(concept.clone());
+                                    // Dinamikus detektor létrehozása
                                     if let Some(detector) = Self::create_detector(&pattern, concept.clone()) {
                                         registry.add_detector(Box::new(detector));
                                     }
@@ -65,7 +67,9 @@ impl ConceptLearner {
         new_concepts
     }
 
-    fn extract_pattern(diff: &crate::structure::topology::NodeTransformation) -> Option<String> {
+    fn extract_pattern(
+        diff: &crate::structure::topology::NodeTransformation,
+    ) -> Option<String> {
         match diff {
             crate::structure::topology::NodeTransformation::Create { color, .. } => {
                 Some(format!("create_{}", color))
@@ -99,9 +103,10 @@ impl ConceptLearner {
     }
 
     fn create_detector(pattern: &str, concept: Concept) -> Option<ColorDetector> {
+        // Kivonjuk a színt a mintából (pl. "create_1" -> "1")
         let parts: Vec<&str> = pattern.split('_').collect();
         if parts.len() >= 2 {
-            let color = parts[1..].join("_");
+            let color = parts[1..].join("_"); // ha összetett lenne a név
             Some(ColorDetector { color, concept })
         } else {
             None
