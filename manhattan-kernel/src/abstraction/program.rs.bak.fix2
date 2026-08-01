@@ -1,0 +1,590 @@
+use crate::sandbox::operators::Transformation;
+use crate::structure::KernelStructureGraph;
+use crate::structure::topology::{graph_diff, NodeTransformation};
+use super::transform::{TransformRule, TransformationAlgebra, Condition, ExtremeMode};
+use crate::concept::Concept;
+use std::collections::HashMap;
+
+// ---------------------------------------------------------------------
+// TargetSpec
+// ---------------------------------------------------------------------
+
+/// Leírja, hogy egy absztrakt transzformáció cél-paraméterét hogyan kell
+/// kiszámítani a teszt-input gráfból, a célgráf ismerete nélkül.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TargetSpec {
+    /// Mindig ugyanaz a konkrét érték (minden train-párban azonos volt)
+    Constant(String),
+    /// Egy másik node-hoz képest relatív pozíció
+    RelativeToNode {
+        condition: Box<Condition>,
+        dx_offset: i64,
+        dy_offset: i64,
+    },
+    /// Rács sarkához/széléhez igazítás
+    GridAnchor {
+        corner: GridCorner,
+    },
+    /// Attribútum átvétele egy másik node-tól
+    CopyAttributeFrom {
+        condition: Box<Condition>,
+        attribute: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum GridCorner {
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+}
+
+// ---------------------------------------------------------------------
+// Cardinality
+// ---------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Cardinality {
+    All,
+    ExactlyOne,
+    AtMostOne,
+}
+
+// ---------------------------------------------------------------------
+// AbstractStep + GeneralizedProgram
+// ---------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct AbstractStep {
+    pub condition: Option<Condition>,
+    pub transformation: Transformation,
+    pub target_spec: Option<TargetSpec>,
+    pub cardinality: Cardinality,
+}
+
+#[derive(Debug, Clone)]
+pub struct GeneralizedProgram {
+    pub steps: Vec<AbstractStep>,
+    pub confidence: f32,
+    pub num_train_pairs: usize,
+}
+
+impl GeneralizedProgram {
+    pub fn new(steps: Vec<AbstractStep>, confidence: f32, num_train_pairs: usize) -> Self {
+        Self { steps, confidence, num_train_pairs }
+    }
+
+    fn matching_nodes<'a>(
+        graph: &'a KernelStructureGraph,
+        condition: &Condition,
+    ) -> Vec<&'a crate::structure::Node> {
+        match condition {
+            Condition::AlwaysTrue => graph.nodes.iter().collect(),
+            Condition::NodeHasAttribute(attr, expected) => graph
+                .nodes
+                .iter()
+                .filter(|n| n.attributes.get(attr) == Some(expected))
+                .collect(),
+            Condition::ColorEquals(color) => graph
+                .nodes
+                .iter()
+                .filter(|n| n.attributes.get("color") == Some(color))
+                .collect(),
+            Condition::PositionAbove(other_id) => graph.nodes.iter()
+                .filter(|n| graph.edges.iter().any(|e| e.from == n.id && e.to == *other_id && e.rel_type == "below"))
+                .collect(),
+            Condition::PositionLeftOf(other_id) => graph.nodes.iter()
+                .filter(|n| graph.edges.iter().any(|e| e.from == n.id && e.to == *other_id && e.rel_type == "right_of"))
+                .collect(),
+            Condition::Unique(attr) => {
+                let mut counts: HashMap<&str, usize> = HashMap::new();
+                for n in &graph.nodes {
+                    if let Some(val) = n.attributes.get(attr) {
+                        *counts.entry(val.as_str()).or_insert(0) += 1;
+                    }
+                }
+                graph.nodes.iter()
+                    .filter(|n| n.attributes.get(attr).map_or(false, |v| counts.get(v.as_str()) == Some(&1)))
+                    .collect()
+            }
+            Condition::ExtremeByAttribute { attribute, mode } => {
+                let values: Vec<(i64, &crate::structure::Node)> = graph.nodes.iter()
+                    .filter_map(|n| n.attributes.get(attribute)
+                        .and_then(|v| v.parse::<i64>().ok())
+                        .map(|v| (v, n)))
+                    .collect();
+                if values.is_empty() { return vec![]; }
+                let extreme = match mode {
+                    ExtremeMode::Max => values.iter().max_by_key(|(v, _)| *v),
+                    ExtremeMode::Min => values.iter().min_by_key(|(v, _)| *v),
+                };
+                extreme.map(|(_, n)| vec![*n]).unwrap_or_default()
+            }
+            Condition::TouchesBorder => {
+                graph.nodes.iter()
+                    .filter(|n| {
+                        let x: i64 = n.attributes.get("bbox_x").and_then(|v| v.parse().ok()).unwrap_or(0);
+                        let y: i64 = n.attributes.get("bbox_y").and_then(|v| v.parse().ok()).unwrap_or(0);
+                        let w: i64 = n.attributes.get("bbox_w").and_then(|v| v.parse().ok()).unwrap_or(0);
+                        let h: i64 = n.attributes.get("bbox_h").and_then(|v| v.parse().ok()).unwrap_or(0);
+                        x <= 0 || y <= 0
+                    })
+                    .collect()
+            }
+            Condition::And(conds) => {
+                if conds.is_empty() { return vec![]; }
+                let mut result: Vec<&crate::structure::Node> = Self::matching_nodes(graph, &conds[0]);
+                for cond in &conds[1..] {
+                    let next = Self::matching_nodes(graph, cond);
+                    result.retain(|n| next.contains(n));
+                }
+                result
+            }
+            Condition::Not(cond) => {
+                let excluded = Self::matching_nodes(graph, cond);
+                graph.nodes.iter()
+                    .filter(|n| !excluded.contains(n))
+                    .collect()
+            }
+            Condition::StructuralRole(hash) => {
+                graph.nodes.iter()
+                    .filter(|n| {
+                        let node_hash = crate::structure::topology::node_wl_hash(n, graph);
+                        node_hash == *hash
+                    })
+                    .collect()
+            }
+        }
+    }
+
+    fn resolve_target_spec(
+        spec: &TargetSpec,
+        graph: &KernelStructureGraph,
+        grid_width: u8,
+        grid_height: u8,
+    ) -> Option<(i64, i64, Option<String>)> {
+        match spec {
+            TargetSpec::Constant(val) => {
+                if let Ok(v) = val.parse::<i64>() {
+                    Some((v, 0, Some(val.clone())))
+                } else {
+                    Some((0, 0, Some(val.clone())))
+                }
+            }
+            TargetSpec::RelativeToNode { condition, dx_offset, dy_offset } => {
+                let refs = Self::matching_nodes(graph, condition);
+                if let Some(ref_node) = refs.first() {
+                    let rx: i64 = ref_node.attributes.get("bbox_x").and_then(|v| v.parse().ok()).unwrap_or(0);
+                    let ry: i64 = ref_node.attributes.get("bbox_y").and_then(|v| v.parse().ok()).unwrap_or(0);
+                    Some((rx + dx_offset, ry + dy_offset, None))
+                } else {
+                    None
+                }
+            }
+            TargetSpec::GridAnchor { corner } => {
+                let (tx, ty) = match corner {
+                    GridCorner::TopLeft => (0i64, 0i64),
+                    GridCorner::TopRight => (grid_width as i64, 0),
+                    GridCorner::BottomLeft => (0, grid_height as i64),
+                    GridCorner::BottomRight => (grid_width as i64, grid_height as i64),
+                };
+                Some((tx, ty, None))
+            }
+            TargetSpec::CopyAttributeFrom { condition, attribute } => {
+                let refs = Self::matching_nodes(graph, condition);
+                if let Some(ref_node) = refs.first() {
+                    let val = ref_node.attributes.get(attribute).cloned();
+                    Some((0, 0, val))
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    fn apply_step(
+        graph: &KernelStructureGraph,
+        step: &AbstractStep,
+        grid_width: u8,
+        grid_height: u8,
+    ) -> KernelStructureGraph {
+        let candidates: Vec<crate::structure::Node> = match &step.condition {
+            Some(cond) => Self::matching_nodes(graph, cond).into_iter().cloned().collect(),
+            None => graph.nodes.clone(),
+        };
+
+        let mut result = graph.clone();
+        for node in candidates {
+            let mut transformation = step.transformation.clone();
+
+            if let Some(ref spec) = step.target_spec {
+                if let Some((tx, ty, color_opt)) = Self::resolve_target_spec(spec, graph, grid_width, grid_height) {
+                    match &mut transformation {
+                        Transformation::Translate { dx, dy, .. } => {
+                            let ox: i64 = node.attributes.get("bbox_x").and_then(|v| v.parse().ok()).unwrap_or(0);
+                            let oy: i64 = node.attributes.get("bbox_y").and_then(|v| v.parse().ok()).unwrap_or(0);
+                            *dx = tx - ox;
+                            *dy = ty - oy;
+                        }
+                        Transformation::TranslateToTarget { .. } => {
+                            let ox: i64 = node.attributes.get("bbox_x").and_then(|v| v.parse().ok()).unwrap_or(0);
+                            let oy: i64 = node.attributes.get("bbox_y").and_then(|v| v.parse().ok()).unwrap_or(0);
+                            transformation = Transformation::Translate {
+                                node_id: node.id.clone(),
+                                dx: tx - ox,
+                                dy: ty - oy,
+                            };
+                        }
+                        Transformation::RecolorToTarget { .. } => {
+                            if let Some(color) = color_opt {
+                                transformation = Transformation::Recolor {
+                                    node_id: node.id.clone(),
+                                    new_color: color,
+                                };
+                            }
+                        }
+                        Transformation::Recolor { ref mut new_color, .. } => {
+                            if let Some(color) = color_opt {
+                                *new_color = color;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            result = crate::sandbox::operators::apply_transformation(&result, &transformation);
+        }
+        result
+    }
+
+    pub fn apply(
+        &self,
+        graph: &KernelStructureGraph,
+        grid_width: u8,
+        grid_height: u8,
+    ) -> KernelStructureGraph {
+        let mut current = graph.clone();
+        for step in &self.steps {
+            current = Self::apply_step(&current, step, grid_width, grid_height);
+        }
+        current
+    }
+
+    pub fn is_applicable(&self, graph: &KernelStructureGraph) -> bool {
+        self.steps.iter().all(|step| {
+            match &step.condition {
+                Some(cond) => !Self::matching_nodes(graph, cond).is_empty(),
+                None => !graph.nodes.is_empty(),
+            }
+        })
+    }
+}
+
+// ---------------------------------------------------------------------
+// Program (konkrét)
+// ---------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+pub struct Program {
+    pub steps: Vec<Transformation>,
+    pub confidence: f32,
+    pub success_count: u64,
+}
+
+impl Program {
+    pub fn new(steps: Vec<Transformation>) -> Self {
+        Self { steps, confidence: 0.5, success_count: 1 }
+    }
+
+    pub fn cost(&self) -> f64 {
+        (1.0 - self.confidence as f64) * (self.steps.len() as f64).max(1.0)
+    }
+
+    pub fn apply(&self, graph: &KernelStructureGraph) -> KernelStructureGraph {
+        let mut current = graph.clone();
+        for step in &self.steps {
+            current = crate::sandbox::operators::apply_transformation(&current, step);
+        }
+        current
+    }
+
+    pub fn record_success(&mut self) {
+        self.success_count += 1;
+        self.confidence = (self.confidence + 0.1).min(1.0);
+    }
+
+    pub fn record_failure(&mut self) {
+        self.confidence = (self.confidence - 0.1).max(0.0);
+    }
+}
+
+// ---------------------------------------------------------------------
+// generalize_from_pairs (új, Claude terve alapján)
+// ---------------------------------------------------------------------
+
+pub fn generalize_from_pairs(pairs: &[(KernelStructureGraph, KernelStructureGraph)]) -> Option<GeneralizedProgram> {
+    if pairs.is_empty() { return None; }
+
+    let mut all_steps: Vec<AbstractStep> = Vec::new();
+    let mut total_valid = 0;
+    let num_pairs = pairs.len();
+
+    // Gyűjtsük a diffeket páronként
+    let diffs_per_pair: Vec<Vec<NodeTransformation>> = pairs.iter()
+        .map(|(inp, out)| graph_diff(inp, out).into_iter()
+            .filter(|d| !matches!(d, NodeTransformation::Unchanged { .. }))
+            .collect())
+        .collect();
+
+    // Csoportosítsuk a diffeket típus szerint
+    let mut translate_diffs: Vec<Vec<(usize, &NodeTransformation)>> = Vec::new();
+    let mut recolor_diffs: Vec<Vec<(usize, &NodeTransformation)>> = Vec::new();
+    let mut create_diffs: Vec<Vec<(usize, &NodeTransformation)>> = Vec::new();
+    let mut delete_diffs: Vec<Vec<(usize, &NodeTransformation)>> = Vec::new();
+    let mut rotate_diffs: Vec<Vec<(usize, &NodeTransformation)>> = Vec::new();
+
+    for (pair_idx, diffs) in diffs_per_pair.iter().enumerate() {
+        for diff in diffs {
+            match diff {
+                NodeTransformation::Translate { .. } => {
+                    if translate_diffs.len() <= pair_idx { translate_diffs.resize(pair_idx + 1, Vec::new()); }
+                    translate_diffs[pair_idx].push((pair_idx, diff));
+                }
+                NodeTransformation::Recolor { .. } => {
+                    if recolor_diffs.len() <= pair_idx { recolor_diffs.resize(pair_idx + 1, Vec::new()); }
+                    recolor_diffs[pair_idx].push((pair_idx, diff));
+                }
+                NodeTransformation::Create { .. } => {
+                    if create_diffs.len() <= pair_idx { create_diffs.resize(pair_idx + 1, Vec::new()); }
+                    create_diffs[pair_idx].push((pair_idx, diff));
+                }
+                NodeTransformation::Delete { .. } => {
+                    if delete_diffs.len() <= pair_idx { delete_diffs.resize(pair_idx + 1, Vec::new()); }
+                    delete_diffs[pair_idx].push((pair_idx, diff));
+                }
+                NodeTransformation::Rotate { .. } => {
+                    if rotate_diffs.len() <= pair_idx { rotate_diffs.resize(pair_idx + 1, Vec::new()); }
+                    rotate_diffs[pair_idx].push((pair_idx, diff));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // Segédfüggvény: feltétel keresése
+    fn find_best_condition(
+        pairs: &[(KernelStructureGraph, KernelStructureGraph)],
+        diffs_by_pair: &[Vec<(usize, &NodeTransformation)>],
+    ) -> Option<Condition> {
+        let mut candidates: Vec<Condition> = Vec::new();
+
+        // Jelöltek: color, area, node_type, uniqueness, extreme
+        for attr in &["color", "area", "node_type"] {
+            let mut all_same = true;
+            let mut common_val: Option<String> = None;
+            for (pair_idx, diff) in diffs_by_pair.iter().flatten() {
+                let input = &pairs[*pair_idx].0;
+                if let Some(node_id) = get_node_id(diff) {
+                    if let Some(node) = input.nodes.iter().find(|n| n.id == *node_id) {
+                        if let Some(val) = node.attributes.get(*attr) {
+                            if common_val.is_none() {
+                                common_val = Some(val.clone());
+                            } else if common_val.as_ref() != Some(val) {
+                                all_same = false;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            if all_same && common_val.is_some() {
+                candidates.push(Condition::NodeHasAttribute(attr.to_string(), common_val.unwrap()));
+            }
+        }
+
+        candidates.first().cloned()
+    }
+
+    fn get_node_id<'a>(diff: &'a NodeTransformation) -> Option<&'a String> {
+        match diff {
+            NodeTransformation::Translate { node_id, .. } => Some(node_id),
+            NodeTransformation::Recolor { node_id, .. } => Some(node_id),
+            NodeTransformation::Delete { node_id } => Some(node_id),
+            NodeTransformation::Rotate { node_id, .. } => Some(node_id),
+            NodeTransformation::Create { .. } => None,
+            _ => None,
+        }
+    }
+
+    // Translate
+    if !translate_diffs.is_empty() && translate_diffs.iter().all(|v| !v.is_empty()) {
+        let condition = find_best_condition(pairs, &translate_diffs);
+        let target_spec = infer_target_spec(pairs, &translate_diffs, "bbox");
+        all_steps.push(AbstractStep {
+            condition,
+            transformation: Transformation::TranslateToTarget { node_id: "obj_0".into() },
+            target_spec,
+            cardinality: Cardinality::All,
+        });
+    }
+
+    // Recolor
+    if !recolor_diffs.is_empty() && recolor_diffs.iter().all(|v| !v.is_empty()) {
+        let condition = find_best_condition(pairs, &recolor_diffs);
+        let target_spec = infer_target_spec(pairs, &recolor_diffs, "color");
+        all_steps.push(AbstractStep {
+            condition,
+            transformation: Transformation::RecolorToTarget { node_id: "obj_0".into() },
+            target_spec,
+            cardinality: Cardinality::All,
+        });
+    }
+
+    if all_steps.is_empty() { return None; }
+
+    let confidence = if num_pairs >= 3 { 0.9 } else if num_pairs == 2 { 0.7 } else { 0.5 };
+    Some(GeneralizedProgram::new(all_steps, confidence, num_pairs))
+}
+
+fn infer_target_spec(
+    pairs: &[(KernelStructureGraph, KernelStructureGraph)],
+    diffs_by_pair: &[Vec<(usize, &NodeTransformation)>],
+    attr: &str,
+) -> Option<TargetSpec> {
+    let mut all_values = Vec::new();
+    for (pair_idx, diff) in diffs_by_pair.iter().flatten() {
+        match diff {
+            NodeTransformation::Translate { dx, dy, .. } => {
+                all_values.push((*dx, *dy));
+            }
+            NodeTransformation::Recolor { new_color, .. } => {
+                all_values.push((0, 0));
+                return Some(TargetSpec::Constant(new_color.clone()));
+            }
+            _ => {}
+        }
+    }
+    if all_values.is_empty() { return None; }
+    let first = all_values[0];
+    if all_values.iter().all(|&(dx, dy)| dx == first.0 && dy == first.1) {
+        Some(TargetSpec::Constant(format!("{},{}", first.0, first.1)))
+    } else {
+        None
+    }
+}
+
+// ---------------------------------------------------------------------
+// ProgramSynthesizer
+// ---------------------------------------------------------------------
+
+pub struct ProgramSynthesizer {
+    pub programs: Vec<Program>,
+    pub generalized_programs: Vec<GeneralizedProgram>,
+    pub algebra: TransformationAlgebra,
+    concept_transforms: Vec<(Concept, String)>,
+}
+
+impl ProgramSynthesizer {
+    pub fn new() -> Self {
+        let mut ct = Vec::new();
+        ct.push((Concept::Connected, "Translate".into()));
+        ct.push((Concept::Symmetry, "Recolor".into()));
+        ct.push((Concept::Player, "Translate".into()));
+        ct.push((Concept::Exit, "Translate".into()));
+        ct.push((Concept::Hole, "Delete".into()));
+        ct.push((Concept::Largest, "Translate".into()));
+        Self { programs: Vec::new(), generalized_programs: Vec::new(), algebra: TransformationAlgebra::new(), concept_transforms: ct }
+    }
+
+    pub fn map_concept_to_transform(&mut self, concept: Concept, transform_name: &str) {
+        self.concept_transforms.push((concept, transform_name.to_string()));
+    }
+
+    pub fn transforms_for_concept(&self, concept: &Concept) -> Vec<String> {
+        self.concept_transforms.iter()
+            .filter(|(c, _)| c == concept)
+            .map(|(_, t)| t.clone())
+            .collect()
+    }
+
+    pub fn learn_from_example(&mut self, before: &KernelStructureGraph, after: &KernelStructureGraph) -> Option<Program> {
+        let diffs: Vec<_> = graph_diff(before, after).into_iter().filter(|d| !matches!(d, NodeTransformation::Unchanged { .. })).collect();
+        if diffs.is_empty() { return None; }
+
+        let mut steps = Vec::new();
+        for diff in &diffs {
+            if let Some(step) = Self::diff_to_transformation(diff, after) {
+                steps.push(step);
+            }
+        }
+        if steps.is_empty() { return None; }
+
+        let program = Program::new(steps);
+        self.programs.push(program.clone());
+        for step in &program.steps {
+            self.algebra.add_rule(TransformRule::new(step.clone()));
+        }
+        Some(program)
+    }
+
+    fn diff_to_transformation(diff: &NodeTransformation, after: &KernelStructureGraph) -> Option<Transformation> {
+        match diff {
+            NodeTransformation::Translate { node_id, dx, dy } => {
+                Some(Transformation::Translate { node_id: node_id.clone(), dx: *dx, dy: *dy })
+            }
+            NodeTransformation::Recolor { node_id, new_color } => {
+                Some(Transformation::Recolor { node_id: node_id.clone(), new_color: new_color.clone() })
+            }
+            NodeTransformation::Delete { node_id } => {
+                Some(Transformation::Delete { node_id: node_id.clone() })
+            }
+            NodeTransformation::Create { node_id: nid, color, bbox_x, bbox_y } => {
+                if let Some(new_node) = after.nodes.iter().find(|n| n.id == *nid) {
+                    let bw = new_node.attributes.get("bbox_w").and_then(|v| v.parse().ok()).unwrap_or(1);
+                    let bh = new_node.attributes.get("bbox_h").and_then(|v| v.parse().ok()).unwrap_or(1);
+                    Some(Transformation::Create { color: color.clone(), bbox_x: *bbox_x, bbox_y: *bbox_y, bbox_w: bw, bbox_h: bh })
+                } else {
+                    None
+                }
+            }
+            NodeTransformation::Rotate { node_id, angle } => {
+                Some(Transformation::Rotate { node_id: node_id.clone(), angle: *angle })
+            }
+            NodeTransformation::Unchanged { .. } => None,
+        }
+    }
+
+    pub fn generalize_from_pairs(&mut self, pairs: &[(KernelStructureGraph, KernelStructureGraph)]) -> Option<GeneralizedProgram> {
+        let gen_program = generalize_from_pairs(pairs)?;
+        self.generalized_programs.push(gen_program.clone());
+        Some(gen_program)
+    }
+
+    pub fn find_best_generalized_program(&self, graph: &KernelStructureGraph, _grid_width: u8, _grid_height: u8) -> Option<GeneralizedProgram> {
+        self.generalized_programs.iter()
+            .filter(|g| g.is_applicable(graph))
+            .max_by(|a, b| a.confidence.partial_cmp(&b.confidence).unwrap())
+            .cloned()
+    }
+
+    pub fn find_best_program(&self, graph: &KernelStructureGraph, target: &KernelStructureGraph) -> Option<Program> {
+        self.programs.iter()
+            .filter(|p| {
+                let result = p.apply(graph);
+                result.nodes.len() == target.nodes.len()
+            })
+            .max_by(|a, b| a.confidence.partial_cmp(&b.confidence).unwrap())
+            .cloned()
+    }
+
+    pub fn consolidate(&mut self) {
+        self.programs.retain(|p| p.confidence > 0.4);
+        self.generalized_programs.retain(|g| g.confidence > 0.4);
+        if self.programs.len() > 50 {
+            self.programs.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap());
+            self.programs.truncate(50);
+        }
+    }
+}

@@ -17,3 +17,5 @@ pub mod hypothesis_bus;
 pub mod concept;
 pub mod meta_learner;
 pub mod concept_learner;
+pub mod arc_agi3_adapter;
+pub mod predicate;

@@ -198,14 +198,14 @@ impl<'a> PolicyEngine<'a> {
         program.steps.iter().map(|step| {
             match step {
                 Transformation::RecolorToTarget { node_id } => {
-                    if let Some(target_node) = target_ksg.nodes.iter().find(|n| &n.id == node_id) {
+                    if let Some(target_node) = target_ksg.nodes.iter().find(|n| n.id == *node_id) {
                         if let Some(color) = target_node.attributes.get("color") {
                             Transformation::Recolor { node_id: node_id.clone(), new_color: color.clone() }
                         } else { Transformation::NoOp }
                     } else { Transformation::NoOp }
                 }
                 Transformation::TranslateToTarget { node_id } => {
-                    if let Some(target_node) = target_ksg.nodes.iter().find(|n| &n.id == node_id) {
+                    if let Some(target_node) = target_ksg.nodes.iter().find(|n| n.id == *node_id) {
                         let tx = target_node.attributes.get("bbox_x").and_then(|v| v.parse::<i64>().ok()).unwrap_or(0);
                         let ty = target_node.attributes.get("bbox_y").and_then(|v| v.parse::<i64>().ok()).unwrap_or(0);
                         Transformation::Translate { node_id: node_id.clone(), dx: tx, dy: ty }

@@ -34,7 +34,7 @@ mod unit_abstract_recolor_tests {
         }
 
         // Ellenőrizzük, hogy a program RecolorToTarget-et tartalmaz
-        let has_abstract = program.steps.iter().any(|s| matches!(s, Transformation::RecolorToTarget { .. }));
+        let has_abstract = program.steps.iter().any(|s| matches!(s, crate::sandbox::operators::Transformation::RecolorToTarget { .. }));
         assert!(has_abstract, "Program must contain RecolorToTarget (abstract recolor)");
         println!("Abstraction successful: kernel understands 'change color' as an invariant");
     }

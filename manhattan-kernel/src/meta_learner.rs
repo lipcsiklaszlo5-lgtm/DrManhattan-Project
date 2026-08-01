@@ -5,7 +5,7 @@ use crate::abstraction::hypothesis::HypothesisManager;
 use crate::abstraction::goal_decomposer::GoalDecomposer;
 use crate::concept::{ConceptRegistry, Concept};
 use crate::concept_learner::ConceptLearner;
-use crate::adapter::arc::adapter::ArcGrid;
+use crate::adapter::arc::adapter::{ArcGrid, ArcAdapter};
 use std::collections::HashMap;
 
 pub struct TaskInstance {
@@ -37,61 +37,47 @@ impl MetaLearner {
     }
 
     pub fn learn_from_task(&mut self, task: TaskInstance) -> bool {
-        struct OneShotEnv {
-            obs: ArcGrid,
-            target: ArcGrid,
-            solved: bool,
-        }
-        impl Environment for OneShotEnv {
-            fn step(&mut self, action: &str) -> Result<(ArcGrid, ArcGrid), String> {
-                if action == "solve" && !self.solved {
-                    self.solved = true;
-                    Ok((self.obs.clone(), self.target.clone()))
-                } else {
-                    Err("already solved or unknown action".into())
-                }
-            }
-            fn reset(&mut self) -> ArcGrid { self.obs.clone() }
-        }
+        let input_ksg = ArcAdapter::grid_to_ksg(&task.grid);
+        let target_ksg = ArcAdapter::grid_to_ksg(&task.target);
 
-        let mut env = OneShotEnv { obs: task.grid.clone(), target: task.target.clone(), solved: false };
-        match self.agent.run_episode(&mut env, 5) {
-            Ok(_program) => {
-                let target_ksg = crate::adapter::arc::adapter::ArcAdapter::grid_to_ksg(&task.target);
+        // 1. Próbáljunk generalizált programot tanulni
+        if let Some(gen_prog) = self.program_synthesizer.learn_generalized(&input_ksg, &target_ksg) {
+            let result_ksg = gen_prog.apply(&input_ksg, task.target.width, task.target.height);
+            let result_grid = ArcAdapter::ksg_to_grid(&result_ksg, task.target.width, task.target.height, 0);
+            if result_grid.pixels == task.target.pixels {
                 self.hypothesis_manager.process_grid(&task.grid, &mut self.program_synthesizer, Some(&target_ksg));
                 let rep_name = self.hypothesis_manager.best_hypothesis().map(|h| h.representation_name.clone());
-                if let Some(name) = rep_name {
-                    self.hypothesis_manager.record_success(&name);
-                }
-                // Fogalomtanulás sikeres tanulás után is
+                if let Some(name) = rep_name { self.hypothesis_manager.record_success(&name); }
                 self.analyze_and_adapt(&task.grid, &task.target);
-                let key = "agent_one_shot".to_string();
-                let entry = self.task_stats.entry(key).or_insert((0,0));
+                let key = "generalized".to_string();
+                let entry = self.task_stats.entry(key).or_insert((0, 0));
                 entry.0 += 1; entry.1 += 1;
-                true
-            }
-            Err(_) => {
-                match self.explorer.explore_to_target(&task.grid, &task.target, 20) {
-                    Ok(_plan) => {
-                        if let Some(learned) = self.explorer.synthesizer.programs.last() {
-                            self.program_synthesizer.programs.push(learned.clone());
-                        }
-                        self.analyze_and_adapt(&task.grid, &task.target);
-                        let key = "explorer".to_string();
-                        let entry = self.task_stats.entry(key).or_insert((0,0));
-                        entry.0 += 1; entry.1 += 1;
-                        true
-                    }
-                    Err(_) => {
-                        self.analyze_and_adapt(&task.grid, &task.target);
-                        let key = "agent_one_shot".to_string();
-                        let entry = self.task_stats.entry(key).or_insert((0,0));
-                        entry.1 += 1;
-                        false
-                    }
-                }
+                return true;
             }
         }
+
+        // 2. Visszaesés a konkrét programra
+        if let Some(prog) = self.program_synthesizer.learn_from_example(&input_ksg, &target_ksg) {
+            let result_ksg = prog.apply(&input_ksg);
+            let result_grid = ArcAdapter::ksg_to_grid(&result_ksg, task.target.width, task.target.height, 0);
+            if result_grid.pixels == task.target.pixels {
+                self.hypothesis_manager.process_grid(&task.grid, &mut self.program_synthesizer, Some(&target_ksg));
+                let rep_name = self.hypothesis_manager.best_hypothesis().map(|h| h.representation_name.clone());
+                if let Some(name) = rep_name { self.hypothesis_manager.record_success(&name); }
+                self.analyze_and_adapt(&task.grid, &task.target);
+                let key = "concrete".to_string();
+                let entry = self.task_stats.entry(key).or_insert((0, 0));
+                entry.0 += 1; entry.1 += 1;
+                return true;
+            }
+        }
+
+        // 3. Sikertelen
+        self.analyze_and_adapt(&task.grid, &task.target);
+        let key = "failed".to_string();
+        let entry = self.task_stats.entry(key).or_insert((0, 0));
+        entry.1 += 1;
+        false
     }
 
     pub fn learn_interactive(&mut self, env: &mut dyn Environment, max_episodes: usize) -> Result<f64, String> {
@@ -101,19 +87,19 @@ impl MetaLearner {
         for _ep in 0..max_episodes {
             total_attempts += 1;
             let obs = env.reset();
-            let mut current_ksg = crate::adapter::arc::adapter::ArcAdapter::grid_to_ksg(&obs);
+            let mut current_ksg = ArcAdapter::grid_to_ksg(&obs);
             for _step in 0..10 {
                 let actions = self.explorer.possible_actions(&current_ksg);
                 if actions.is_empty() { break; }
                 use rand::seq::SliceRandom;
                 let action = actions.choose(&mut rand::thread_rng()).unwrap().clone();
                 if let Ok((new_obs, _target)) = env.step(&action) {
-                    let new_ksg = crate::adapter::arc::adapter::ArcAdapter::grid_to_ksg(&new_obs);
-                    self.program_synthesizer.learn_from_example(&current_ksg, &new_ksg);
+                    let new_ksg = ArcAdapter::grid_to_ksg(&new_obs);
+                    self.program_synthesizer.learn_generalized(&current_ksg, &new_ksg);
                     current_ksg = new_ksg;
                 }
             }
-            if self.program_synthesizer.programs.len() > total_success as usize {
+            if self.program_synthesizer.generalized_programs.len() > total_success as usize {
                 total_success += 1;
             }
         }
@@ -121,12 +107,12 @@ impl MetaLearner {
     }
 
     fn analyze_and_adapt(&mut self, input: &ArcGrid, target: &ArcGrid) {
-        let input_ksg = crate::adapter::arc::adapter::ArcAdapter::grid_to_ksg(input);
-        let target_ksg = crate::adapter::arc::adapter::ArcAdapter::grid_to_ksg(target);
+        let input_ksg = ArcAdapter::grid_to_ksg(input);
+        let target_ksg = ArcAdapter::grid_to_ksg(target);
         let subgoals = GoalDecomposer::decompose(&input_ksg, &target_ksg);
         if !subgoals.is_empty() {
             for sg in &subgoals {
-                self.program_synthesizer.learn_from_example(&input_ksg, &sg.target_ksg);
+                self.program_synthesizer.learn_generalized(&input_ksg, &sg.target_ksg);
             }
         }
         let new_concepts = self.concept_learner.learn_from_diff(&input_ksg, &target_ksg, &mut self.concept_registry);
@@ -138,6 +124,9 @@ impl MetaLearner {
         let static_concepts = self.discover_concepts(&input_ksg, &target_ksg);
         for concept in static_concepts {
             println!("Static concept detected: {:?}", concept);
+        }
+        if self.program_synthesizer.generalized_programs.len() > 50 {
+            self.program_synthesizer.consolidate();
         }
     }
 

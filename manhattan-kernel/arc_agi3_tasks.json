@@ -1,0 +1,32 @@
+[
+    {
+        "task_id": "arc3_mock_001",
+        "description": "Move single pixel right",
+        "input": [[0,0,0],[0,1,0],[0,0,0]],
+        "output": [[0,0,0],[0,0,1],[0,0,0]]
+    },
+    {
+        "task_id": "arc3_mock_002",
+        "description": "Recolor pixel",
+        "input": [[1,0],[0,0]],
+        "output": [[2,0],[0,0]]
+    },
+    {
+        "task_id": "arc3_mock_003",
+        "description": "Create new pixel",
+        "input": [[0,0],[0,0]],
+        "output": [[0,0],[0,1]]
+    },
+    {
+        "task_id": "arc3_mock_004",
+        "description": "Delete pixel",
+        "input": [[1,0],[0,0]],
+        "output": [[0,0],[0,0]]
+    },
+    {
+        "task_id": "arc3_mock_005",
+        "description": "Translate and recolor",
+        "input": [[0,1,0],[0,0,0],[0,0,0]],
+        "output": [[0,0,0],[0,0,0],[0,2,0]]
+    }
+]

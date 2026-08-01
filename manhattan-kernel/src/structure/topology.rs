@@ -169,3 +169,10 @@ pub fn graph_diff(
     transformations
 }
 
+pub fn node_wl_hash(node: &Node, graph: &KernelStructureGraph) -> u64 {
+    let mut hash = 0u64;
+    for (key, val) in &node.attributes {
+        hash ^= (key.len() as u64) << 16 | val.len() as u64;
+    }
+    hash
+}

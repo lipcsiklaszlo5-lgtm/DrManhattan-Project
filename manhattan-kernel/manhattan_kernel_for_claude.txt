@@ -1,0 +1,2782 @@
+================================================================================
+MANHATTAN KERNEL - TELJES FORRÁSKÓD
+================================================================================
+
+
+================================================================================
+FÁJL: src/abstraction/program.rs
+================================================================================
+
+use crate::sandbox::operators::Transformation;
+use crate::structure::KernelStructureGraph;
+use crate::structure::topology::{graph_diff, NodeTransformation};
+use super::transform::{TransformRule, TransformationAlgebra, Condition};
+use crate::concept::Concept;
+
+// ---------------------------------------------------------------------
+// AbstractStep + GeneralizedProgram
+// ---------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct AbstractStep {
+    pub condition: Option<Condition>,
+    pub transformation: Transformation,
+}
+
+#[derive(Debug, Clone)]
+pub struct GeneralizedProgram {
+    pub steps: Vec<AbstractStep>,
+}
+
+impl GeneralizedProgram {
+    pub fn new(steps: Vec<AbstractStep>) -> Self {
+        Self { steps }
+    }
+
+    fn matching_nodes<'a>(
+        graph: &'a KernelStructureGraph,
+        condition: &Condition,
+    ) -> Vec<&'a crate::structure::Node> {
+        match condition {
+            Condition::AlwaysTrue => graph.nodes.iter().collect(),
+            Condition::NodeHasAttribute(attr, expected) => graph
+                .nodes
+                .iter()
+                .filter(|n| n.attributes.get(attr) == Some(expected))
+                .collect(),
+            Condition::ColorEquals(color) => graph
+                .nodes
+                .iter()
+                .filter(|n| n.attributes.get("color") == Some(color))
+                .collect(),
+            Condition::PositionAbove(other_id) => {
+                graph.nodes.iter()
+                    .filter(|n| graph.edges.iter().any(|e| e.from == n.id && e.to == *other_id && e.rel_type == "below"))
+                    .collect()
+            }
+            Condition::PositionLeftOf(other_id) => {
+                graph.nodes.iter()
+                    .filter(|n| graph.edges.iter().any(|e| e.from == n.id && e.to == *other_id && e.rel_type == "right_of"))
+                    .collect()
+            }
+        }
+    }
+
+    fn resolve_transformation(
+        transformation: &Transformation,
+        node: &crate::structure::Node,
+        target: Option<&KernelStructureGraph>,
+    ) -> Transformation {
+        match transformation {
+            Transformation::RecolorToTarget { .. } => {
+                let new_color = target
+                    .and_then(|t| t.nodes.iter().find(|n| n.id == node.id))
+                    .and_then(|t_node| t_node.attributes.get("color"))
+                    .cloned()
+                    .unwrap_or_else(|| node.attributes.get("color").cloned().unwrap_or_default());
+                Transformation::Recolor {
+                    node_id: node.id.clone(),
+                    new_color,
+                }
+            }
+            Transformation::TranslateToTarget { .. } => {
+                if let Some(t) = target {
+                    if let Some(t_node) = t.nodes.iter().find(|n| n.id == node.id) {
+                        let ox: i64 = node.attributes.get("bbox_x").and_then(|v| v.parse().ok()).unwrap_or(0);
+                        let oy: i64 = node.attributes.get("bbox_y").and_then(|v| v.parse().ok()).unwrap_or(0);
+                        let tx: i64 = t_node.attributes.get("bbox_x").and_then(|v| v.parse().ok()).unwrap_or(ox);
+                        let ty: i64 = t_node.attributes.get("bbox_y").and_then(|v| v.parse().ok()).unwrap_or(oy);
+                        return Transformation::Translate {
+                            node_id: node.id.clone(),
+                            dx: tx - ox,
+                            dy: ty - oy,
+                        };
+                    }
+                }
+                Transformation::NoOp
+            }
+            Transformation::Translate { dx, dy, .. } => Transformation::Translate {
+                node_id: node.id.clone(),
+                dx: *dx,
+                dy: *dy,
+            },
+            Transformation::Recolor { new_color, .. } => Transformation::Recolor {
+                node_id: node.id.clone(),
+                new_color: new_color.clone(),
+            },
+            Transformation::Delete { .. } => Transformation::Delete {
+                node_id: node.id.clone(),
+            },
+            Transformation::Rotate { angle, .. } => Transformation::Rotate {
+                node_id: node.id.clone(),
+                angle: *angle,
+            },
+            Transformation::Create {
+                color,
+                bbox_x,
+                bbox_y,
+                bbox_w,
+                bbox_h,
+            } => Transformation::Create {
+                color: color.clone(),
+                bbox_x: *bbox_x,
+                bbox_y: *bbox_y,
+                bbox_w: *bbox_w,
+                bbox_h: *bbox_h,
+            },
+            Transformation::Merge { node_a, node_b } => Transformation::Merge {
+                node_a: node_a.clone(),
+                node_b: node_b.clone(),
+            },
+            Transformation::Split { node_id } => Transformation::Split {
+                node_id: node_id.clone(),
+            },
+            Transformation::NoOp => Transformation::NoOp,
+        }
+    }
+
+    fn apply_step(
+        graph: &KernelStructureGraph,
+        step: &AbstractStep,
+        target: Option<&KernelStructureGraph>,
+    ) -> KernelStructureGraph {
+        let candidates: Vec<crate::structure::Node> = match &step.condition {
+            Some(cond) => Self::matching_nodes(graph, cond).into_iter().cloned().collect(),
+            None => graph.nodes.clone(),
+        };
+
+        let mut result = graph.clone();
+        for node in candidates {
+            let concrete = Self::resolve_transformation(&step.transformation, &node, target);
+            result = crate::sandbox::operators::apply_transformation(&result, &concrete);
+        }
+        result
+    }
+
+    pub fn apply(
+        &self,
+        graph: &KernelStructureGraph,
+        target: Option<&KernelStructureGraph>,
+    ) -> KernelStructureGraph {
+        let mut current = graph.clone();
+        for step in &self.steps {
+            current = Self::apply_step(&current, step, target);
+        }
+        current
+    }
+}
+
+// ---------------------------------------------------------------------
+// Program (konkrét)
+// ---------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+pub struct Program {
+    pub steps: Vec<Transformation>,
+    pub confidence: f32,
+    pub success_count: u64,
+}
+
+impl Program {
+    pub fn new(steps: Vec<Transformation>) -> Self {
+        Self { steps, confidence: 0.5, success_count: 1 }
+    }
+
+    pub fn cost(&self) -> f64 {
+        (1.0 - self.confidence as f64) * (self.steps.len() as f64).max(1.0)
+    }
+
+    pub fn apply(&self, graph: &KernelStructureGraph) -> KernelStructureGraph {
+        let mut current = graph.clone();
+        for step in &self.steps {
+            current = crate::sandbox::operators::apply_transformation(&current, step);
+        }
+        current
+    }
+
+    pub fn record_success(&mut self) {
+        self.success_count += 1;
+        self.confidence = (self.confidence + 0.1).min(1.0);
+    }
+
+    pub fn record_failure(&mut self) {
+        self.confidence = (self.confidence - 0.1).max(0.0);
+    }
+}
+
+// ---------------------------------------------------------------------
+// generalize_from_pairs (szabad függvény)
+// ---------------------------------------------------------------------
+
+fn infer_common_attribute_condition(nodes: &[crate::structure::Node], attribute: &str) -> Option<Condition> {
+    let mut values = nodes.iter().filter_map(|n| n.attributes.get(attribute));
+    let first = values.next()?;
+    if values.all(|v| v == first) {
+        Some(Condition::NodeHasAttribute(attribute.to_string(), first.clone()))
+    } else {
+        None
+    }
+}
+
+pub fn generalize_from_pairs(pairs: &[(KernelStructureGraph, KernelStructureGraph)]) -> Option<GeneralizedProgram> {
+    if pairs.is_empty() {
+        return None;
+    }
+
+    let mut translate_group: Vec<(crate::structure::Node, i64, i64)> = Vec::new();
+    let mut recolor_group: Vec<(crate::structure::Node, String)> = Vec::new();
+    let mut delete_group: Vec<crate::structure::Node> = Vec::new();
+    let mut rotate_group: Vec<(crate::structure::Node, u16)> = Vec::new();
+    let mut create_group: Vec<(String, u64, u64, u8, u8)> = Vec::new();
+
+    for (input, output) in pairs {
+        for d in graph_diff(input, output) {
+            match d {
+                NodeTransformation::Translate { node_id, dx, dy } => {
+                    if let Some(n) = input.nodes.iter().find(|n| n.id == node_id) {
+                        translate_group.push((n.clone(), dx, dy));
+                    }
+                }
+                NodeTransformation::Recolor { node_id, new_color } => {
+                    if let Some(n) = input.nodes.iter().find(|n| n.id == node_id) {
+                        recolor_group.push((n.clone(), new_color));
+                    }
+                }
+                NodeTransformation::Delete { node_id } => {
+                    if let Some(n) = input.nodes.iter().find(|n| n.id == node_id) {
+                        delete_group.push(n.clone());
+                    }
+                }
+                NodeTransformation::Rotate { node_id, angle } => {
+                    if let Some(n) = input.nodes.iter().find(|n| n.id == node_id) {
+                        rotate_group.push((n.clone(), angle));
+                    }
+                }
+                NodeTransformation::Create { color, bbox_x, bbox_y, .. } => {
+                    create_group.push((color, bbox_x, bbox_y, 1, 1));
+                }
+                NodeTransformation::Unchanged { .. } => {}
+            }
+        }
+    }
+
+    let mut steps: Vec<AbstractStep> = Vec::new();
+
+    if !recolor_group.is_empty() {
+        let nodes: Vec<crate::structure::Node> = recolor_group.iter().map(|(n, _)| n.clone()).collect();
+        let condition = infer_common_attribute_condition(&nodes, "color");
+        let all_same_target = recolor_group.windows(2).all(|w| w[0].1 == w[1].1);
+        let transformation = if all_same_target {
+            Transformation::Recolor {
+                node_id: "obj_0".into(),
+                new_color: recolor_group[0].1.clone(),
+            }
+        } else {
+            Transformation::RecolorToTarget { node_id: "obj_0".into() }
+        };
+        steps.push(AbstractStep { condition, transformation });
+    }
+
+    if !translate_group.is_empty() {
+        let nodes: Vec<crate::structure::Node> = translate_group.iter().map(|(n, _, _)| n.clone()).collect();
+        let condition = infer_common_attribute_condition(&nodes, "color");
+        let all_same_delta = translate_group.windows(2).all(|w| w[0].1 == w[1].1 && w[0].2 == w[1].2);
+        let transformation = if all_same_delta {
+            let (dx, dy) = (translate_group[0].1, translate_group[0].2);
+            Transformation::Translate { node_id: "obj_0".into(), dx, dy }
+        } else {
+            Transformation::TranslateToTarget { node_id: "obj_0".into() }
+        };
+        steps.push(AbstractStep { condition, transformation });
+    }
+
+    if !delete_group.is_empty() {
+        let condition = infer_common_attribute_condition(&delete_group, "color");
+        steps.push(AbstractStep {
+            condition,
+            transformation: Transformation::Delete { node_id: "obj_0".into() },
+        });
+    }
+
+    if !rotate_group.is_empty() {
+        let nodes: Vec<crate::structure::Node> = rotate_group.iter().map(|(n, _)| n.clone()).collect();
+        let condition = infer_common_attribute_condition(&nodes, "color");
+        let all_same_angle = rotate_group.windows(2).all(|w| w[0].1 == w[1].1);
+        let transformation = if all_same_angle {
+            Transformation::Rotate { node_id: "obj_0".into(), angle: rotate_group[0].1 }
+        } else {
+            Transformation::NoOp
+        };
+        steps.push(AbstractStep { condition, transformation });
+    }
+
+    if !create_group.is_empty() {
+        let all_same_color = create_group.windows(2).all(|w| w[0].0 == w[1].0);
+        if all_same_color {
+            let (color, bbox_x, bbox_y, bbox_w, bbox_h) = create_group[0].clone();
+            steps.push(AbstractStep {
+                condition: None,
+                transformation: Transformation::Create { color, bbox_x, bbox_y, bbox_w, bbox_h },
+            });
+        }
+    }
+
+    if steps.is_empty() {
+        None
+    } else {
+        Some(GeneralizedProgram::new(steps))
+    }
+}
+
+// ---------------------------------------------------------------------
+// ProgramSynthesizer
+// ---------------------------------------------------------------------
+
+pub struct ProgramSynthesizer {
+    pub programs: Vec<Program>,
+    pub generalized_programs: Vec<GeneralizedProgram>,
+    pub algebra: TransformationAlgebra,
+    concept_transforms: Vec<(Concept, String)>,
+}
+
+impl ProgramSynthesizer {
+    pub fn new() -> Self {
+        let mut ct = Vec::new();
+        ct.push((Concept::Connected, "Translate".into()));
+        ct.push((Concept::Symmetry, "Recolor".into()));
+        ct.push((Concept::Player, "Translate".into()));
+        ct.push((Concept::Exit, "Translate".into()));
+        ct.push((Concept::Hole, "Delete".into()));
+        ct.push((Concept::Largest, "Translate".into()));
+        Self { programs: Vec::new(), generalized_programs: Vec::new(), algebra: TransformationAlgebra::new(), concept_transforms: ct }
+    }
+
+    pub fn map_concept_to_transform(&mut self, concept: Concept, transform_name: &str) {
+        self.concept_transforms.push((concept, transform_name.to_string()));
+    }
+
+    pub fn transforms_for_concept(&self, concept: &Concept) -> Vec<String> {
+        self.concept_transforms.iter()
+            .filter(|(c, _)| c == concept)
+            .map(|(_, t)| t.clone())
+            .collect()
+    }
+
+    pub fn learn_from_example(&mut self, before: &KernelStructureGraph, after: &KernelStructureGraph) -> Option<Program> {
+        let diffs: Vec<_> = graph_diff(before, after).into_iter().filter(|d| !matches!(d, NodeTransformation::Unchanged { .. })).collect();
+        if diffs.is_empty() { return None; }
+
+        let mut steps = Vec::new();
+        for diff in &diffs {
+            if let Some(step) = Self::diff_to_transformation(diff, after) {
+                steps.push(step);
+            }
+        }
+        if steps.is_empty() { return None; }
+
+        let program = Program::new(steps);
+        self.programs.push(program.clone());
+        for step in &program.steps {
+            self.algebra.add_rule(TransformRule::new(step.clone()));
+        }
+        Some(program)
+    }
+
+    fn diff_to_transformation(diff: &NodeTransformation, after: &KernelStructureGraph) -> Option<Transformation> {
+        match diff {
+            NodeTransformation::Translate { node_id, dx, dy } => {
+                Some(Transformation::Translate { node_id: node_id.clone(), dx: *dx, dy: *dy })
+            }
+            NodeTransformation::Recolor { node_id, new_color } => {
+                Some(Transformation::Recolor { node_id: node_id.clone(), new_color: new_color.clone() })
+            }
+            NodeTransformation::Delete { node_id } => {
+                Some(Transformation::Delete { node_id: node_id.clone() })
+            }
+            NodeTransformation::Create { node_id: nid, color, bbox_x, bbox_y } => {
+                if let Some(new_node) = after.nodes.iter().find(|n| n.id == *nid) {
+                    let bw = new_node.attributes.get("bbox_w").and_then(|v| v.parse().ok()).unwrap_or(1);
+                    let bh = new_node.attributes.get("bbox_h").and_then(|v| v.parse().ok()).unwrap_or(1);
+                    Some(Transformation::Create { color: color.clone(), bbox_x: *bbox_x, bbox_y: *bbox_y, bbox_w: bw, bbox_h: bh })
+                } else {
+                    None
+                }
+            }
+            NodeTransformation::Rotate { node_id, angle } => {
+                Some(Transformation::Rotate { node_id: node_id.clone(), angle: *angle })
+            }
+            NodeTransformation::Unchanged { .. } => None,
+        }
+    }
+
+    pub fn generalize_from_pairs(&mut self, pairs: &[(KernelStructureGraph, KernelStructureGraph)]) -> Option<Program> {
+        let gen_program = generalize_from_pairs(pairs)?;
+
+        let (first_input, first_output) = &pairs[0];
+
+        let mut concrete_steps: Vec<Transformation> = Vec::new();
+        for step in &gen_program.steps {
+            let candidates: Vec<crate::structure::Node> = match &step.condition {
+                Some(cond) => GeneralizedProgram::matching_nodes(first_input, cond)
+                    .into_iter()
+                    .cloned()
+                    .collect(),
+                None => first_input.nodes.clone(),
+            };
+            for node in candidates {
+                concrete_steps.push(GeneralizedProgram::resolve_transformation(
+                    &step.transformation,
+                    &node,
+                    Some(first_output),
+                ));
+            }
+        }
+
+        let predicted = gen_program.apply(first_input, Some(first_output));
+        let matches = predicted.nodes == first_output.nodes;
+        let confidence: f32 = if matches { 0.9 } else { 0.5 };
+
+        let program = Program {
+            steps: concrete_steps,
+            confidence,
+            success_count: if matches { 1 } else { 0 },
+        };
+
+        self.generalized_programs.push(gen_program);
+        self.programs.push(program.clone());
+
+        Some(program)
+    }
+
+    pub fn find_best_program(&self, graph: &KernelStructureGraph, target: &KernelStructureGraph) -> Option<Program> {
+        let mut best: Option<Program> = None;
+        let mut best_confidence = -0.5f32;
+
+        for p in &self.programs {
+            let result = p.apply(graph);
+            if result.nodes == target.nodes && p.confidence > best_confidence {
+                best = Some(p.clone());
+                best_confidence = p.confidence;
+            }
+        }
+
+        for g in &self.generalized_programs {
+            let result = g.apply(graph, Some(target));
+            if result.nodes == target.nodes {
+                let mut steps = Vec::new();
+                for step in &g.steps {
+                    let candidates: Vec<crate::structure::Node> = match &step.condition {
+                        Some(cond) => GeneralizedProgram::matching_nodes(graph, cond)
+                            .into_iter()
+                            .cloned()
+                            .collect(),
+                        None => graph.nodes.clone(),
+                    };
+                    for node in candidates {
+                        steps.push(GeneralizedProgram::resolve_transformation(
+                            &step.transformation,
+                            &node,
+                            Some(target),
+                        ));
+                    }
+                }
+                let confidence = 0.9f32;
+                if confidence > best_confidence {
+                    best = Some(Program {
+                        steps,
+                        confidence,
+                        success_count: 1,
+                    });
+                    best_confidence = confidence;
+                }
+            }
+        }
+
+        best
+    }
+
+    pub fn consolidate(&mut self) {
+        self.programs.retain(|p| p.confidence > 0.4);
+        self.generalized_programs.clear();
+        if self.programs.len() > 50 {
+            self.programs.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap());
+            self.programs.truncate(50);
+        }
+    }
+}
+
+
+
+================================================================================
+FÁJL: src/abstraction/transform.rs
+================================================================================
+
+use crate::sandbox::operators::Transformation;
+
+#[derive(Debug, Clone)]
+pub struct TransformRule {
+    pub conditions: Vec<Condition>,
+    pub action: Transformation,
+    pub confidence: f32,
+    pub success_count: u64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Condition {
+    ColorEquals(String),
+    PositionAbove(String),
+    PositionLeftOf(String),
+    AlwaysTrue,
+    NodeHasAttribute(String, String),
+}
+
+impl TransformRule {
+    pub fn new(action: Transformation) -> Self {
+        Self { conditions: vec![Condition::AlwaysTrue], action, confidence: 0.5, success_count: 1 }
+    }
+
+    pub fn compose(first: &TransformRule, second: &TransformRule) -> Option<TransformRule> {
+        Some(TransformRule {
+            conditions: first.conditions.clone(),
+            action: second.action.clone(),
+            confidence: (first.confidence + second.confidence) / 2.0,
+            success_count: 0,
+        })
+    }
+
+    pub fn record_success(&mut self) {
+        self.success_count += 1;
+        self.confidence = (self.confidence + 0.1).min(1.0);
+    }
+
+    pub fn record_failure(&mut self) {
+        self.confidence = (self.confidence - 0.1).max(0.0);
+    }
+}
+
+pub struct TransformationAlgebra {
+    pub rules: Vec<TransformRule>,
+}
+
+impl TransformationAlgebra {
+    pub fn new() -> Self { Self { rules: Vec::new() } }
+
+    pub fn add_rule(&mut self, rule: TransformRule) {
+        if let Some(existing) = self.rules.iter_mut().find(|r| r.action == rule.action) {
+            existing.record_success();
+        } else {
+            self.rules.push(rule);
+        }
+    }
+
+    pub fn find_best(&self, conditions: &[Condition]) -> Option<&TransformRule> {
+        self.rules.iter()
+            .filter(|r| conditions.iter().all(|c| r.conditions.contains(c)))
+            .max_by(|a, b| a.confidence.partial_cmp(&b.confidence).unwrap())
+    }
+}
+
+
+
+================================================================================
+FÁJL: src/abstraction/hypothesis.rs
+================================================================================
+
+use crate::structure::KernelStructureGraph;
+use crate::adapter::arc::adapter::ArcGrid;
+use crate::abstraction::program::{Program, ProgramSynthesizer};
+use crate::abstraction::representation::{RepresentationFactory};
+
+#[derive(Debug, Clone)]
+pub struct Hypothesis {
+    pub representation_name: String,
+    pub program: Option<Program>,
+    pub cost: f64,
+    pub success_count: u32,
+    pub total_attempts: u32,
+}
+
+impl Hypothesis {
+    pub fn new(representation_name: String, program: Option<Program>, cost: f64) -> Self {
+        Self { representation_name, program, cost, success_count: 0, total_attempts: 0 }
+    }
+    pub fn success_rate(&self) -> f64 {
+        if self.total_attempts == 0 { 0.0 } else { self.success_count as f64 / self.total_attempts as f64 }
+    }
+    pub fn score(&self) -> f64 {
+        let sr = self.success_rate();
+        if sr > 0.0 { sr / self.cost.max(0.001) } else { 1.0 / self.cost.max(0.001) }
+    }
+}
+
+pub struct HypothesisManager {
+    pub hypotheses: Vec<Hypothesis>,
+    factory: RepresentationFactory,
+}
+
+impl HypothesisManager {
+    pub fn new() -> Self {
+        Self { hypotheses: Vec::new(), factory: RepresentationFactory::new() }
+    }
+    pub fn process_grid(
+        &mut self,
+        grid: &ArcGrid,
+        synthesizer: &mut ProgramSynthesizer,
+        target_ksg: Option<&KernelStructureGraph>,
+    ) {
+        let reps = self.factory.build_all(grid);
+        self.hypotheses.clear();
+        for rep in reps {
+            let mut program = None;
+            let mut cost = 1.0_f64;
+            if let Some(target) = target_ksg {
+                if let Some(p) = synthesizer.learn_from_example(&rep.graph, target) {
+                    cost = p.cost();
+                    program = Some(p);
+                }
+            }
+            self.hypotheses.push(Hypothesis::new(rep.name, program, cost));
+        }
+        self.hypotheses.sort_by(|a, b| a.cost.partial_cmp(&b.cost).unwrap_or(std::cmp::Ordering::Equal));
+    }
+    pub fn best_hypothesis(&self) -> Option<&Hypothesis> {
+        self.hypotheses.first()
+    }
+    pub fn best_representation_name(&self) -> Option<String> {
+        self.best_hypothesis().map(|h| h.representation_name.clone())
+    }
+    pub fn record_success(&mut self, rep_name: &str) {
+        if let Some(h) = self.hypotheses.iter_mut().find(|h| h.representation_name == rep_name) {
+            h.success_count += 1; h.total_attempts += 1;
+        }
+    }
+    pub fn record_failure(&mut self, rep_name: &str) {
+        if let Some(h) = self.hypotheses.iter_mut().find(|h| h.representation_name == rep_name) {
+            h.total_attempts += 1;
+        }
+    }
+    pub fn program_cost(&self, _program: &Program) -> f64 {
+        self.hypotheses.first().map(|h| h.cost).unwrap_or(1.0)
+    }
+}
+
+
+
+================================================================================
+FÁJL: src/abstraction/goal_decomposer.rs
+================================================================================
+
+use crate::structure::KernelStructureGraph;
+
+/// Egy részcél: egy köztes állapot, amit el kell érni a végső cél felé
+#[derive(Debug, Clone)]
+pub struct SubGoal {
+    pub target_ksg: KernelStructureGraph,
+    pub priority: u8,
+    pub description: String,
+}
+
+/// A Goal Decomposer a komplex feladatokat kisebb, kezelhető részcélokra bontja
+pub struct GoalDecomposer;
+
+impl GoalDecomposer {
+    /// Részcélok kinyerése a kezdeti és a cél KSG különbségéből
+    pub fn decompose(
+        initial: &KernelStructureGraph,
+        target: &KernelStructureGraph,
+    ) -> Vec<SubGoal> {
+        let mut subgoals = Vec::new();
+
+        // Stratégia: minden objektumra, ami a célban van, de a kezdetiben nincs,
+        // vagy ami megváltozott, hozzunk létre egy részcél-t.
+        for target_node in &target.nodes {
+            let initial_node = initial.nodes.iter().find(|n| n.id == target_node.id);
+
+            match initial_node {
+                Some(init) => {
+                    // Objektum megváltozott – hozzunk létre részcél-t a változásra
+                    let mut changes = Vec::new();
+
+                    if init.attributes.get("color") != target_node.attributes.get("color") {
+                        changes.push("recolor");
+                    }
+                    if init.attributes.get("bbox_x") != target_node.attributes.get("bbox_x")
+                        || init.attributes.get("bbox_y") != target_node.attributes.get("bbox_y")
+                    {
+                        changes.push("translate");
+                    }
+                    if init.attributes.get("bbox_w") != target_node.attributes.get("bbox_w")
+                        && init.attributes.get("bbox_h") != target_node.attributes.get("bbox_h")
+                    {
+                        changes.push("rotate");
+                    }
+
+                    if !changes.is_empty() {
+                        let mut sub_ksg = initial.clone();
+                        // Frissítjük a részcél KSG-t, hogy csak ezt az egy változást tartalmazza
+                        if let Some(sub_node) = sub_ksg.nodes.iter_mut().find(|n| n.id == target_node.id) {
+                            for change in &changes {
+                                match *change {
+                                    "recolor" => {
+                                        if let Some(color) = target_node.attributes.get("color") {
+                                            sub_node.attributes.insert("color".to_string(), color.clone());
+                                        }
+                                    }
+                                    "translate" => {
+                                        if let Some(x) = target_node.attributes.get("bbox_x") {
+                                            sub_node.attributes.insert("bbox_x".to_string(), x.clone());
+                                        }
+                                        if let Some(y) = target_node.attributes.get("bbox_y") {
+                                            sub_node.attributes.insert("bbox_y".to_string(), y.clone());
+                                        }
+                                    }
+                                    "rotate" => {
+                                        if let Some(w) = target_node.attributes.get("bbox_w") {
+                                            sub_node.attributes.insert("bbox_w".to_string(), w.clone());
+                                        }
+                                        if let Some(h) = target_node.attributes.get("bbox_h") {
+                                            sub_node.attributes.insert("bbox_h".to_string(), h.clone());
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+
+                        subgoals.push(SubGoal {
+                            target_ksg: sub_ksg,
+                            priority: 1,
+                            description: format!("Change {:?} for {}", changes, target_node.id),
+                        });
+                    }
+                }
+                None => {
+                    // Új objektum a célban – részcél: létrehozás
+                    let mut sub_ksg = initial.clone();
+                    let new_node = sub_ksg.add_node(&target_node.id, &target_node.node_type);
+                    new_node.attributes = target_node.attributes.clone();
+
+                    subgoals.push(SubGoal {
+                        target_ksg: sub_ksg,
+                        priority: 2,
+                        description: format!("Create object {}", target_node.id),
+                    });
+                }
+            }
+        }
+
+        // Törölt objektumok – részcél: törlés
+        for initial_node in &initial.nodes {
+            if !target.nodes.iter().any(|n| n.id == initial_node.id) {
+                let mut sub_ksg = initial.clone();
+                sub_ksg.nodes.retain(|n| n.id != initial_node.id);
+                sub_ksg.edges.retain(|e| e.from != initial_node.id && e.to != initial_node.id);
+
+                subgoals.push(SubGoal {
+                    target_ksg: sub_ksg,
+                    priority: 3,
+                    description: format!("Delete object {}", initial_node.id),
+                });
+            }
+        }
+
+        // Prioritás szerint rendezzük
+        subgoals.sort_by_key(|s| s.priority);
+        subgoals
+    }
+}
+
+
+
+
+================================================================================
+FÁJL: src/abstraction/representation.rs
+================================================================================
+
+use crate::structure::KernelStructureGraph;
+use crate::adapter::arc::adapter::ArcGrid;
+use crate::concept::{ConceptRegistry, Concept};
+
+#[derive(Debug, Clone)]
+pub struct Representation {
+    pub name: String,
+    pub graph: KernelStructureGraph,
+    pub concepts: Vec<Concept>,
+}
+
+pub struct RepresentationFactory {
+    concept_registry: ConceptRegistry,
+}
+
+impl RepresentationFactory {
+    pub fn new() -> Self {
+        Self { concept_registry: ConceptRegistry::default() }
+    }
+    pub fn with_registry(mut self, reg: ConceptRegistry) -> Self {
+        self.concept_registry = reg; self
+    }
+    pub fn build_all(&self, grid: &ArcGrid) -> Vec<Representation> {
+        let mut reps = Vec::new();
+        let color_ksg = crate::adapter::arc::adapter::ArcAdapter::grid_to_ksg(grid);
+        let concepts = self.concept_registry.scan(&color_ksg);
+        reps.push(Representation { name: "color".into(), graph: color_ksg, concepts });
+
+        let cc_ksg = crate::adapter::arc::adapter::ArcAdapter::grid_to_ksg(grid);
+        let cc_concepts = self.concept_registry.scan(&cc_ksg);
+        reps.push(Representation { name: "connected_components".into(), graph: cc_ksg, concepts: cc_concepts });
+
+        let sym_ksg = crate::adapter::arc::adapter::ArcAdapter::grid_to_ksg(grid);
+        let sym_concepts = self.concept_registry.scan(&sym_ksg);
+        reps.push(Representation { name: "symmetry".into(), graph: sym_ksg, concepts: sym_concepts });
+
+        let topo_ksg = crate::adapter::arc::adapter::ArcAdapter::grid_to_ksg(grid);
+        let topo_concepts = self.concept_registry.scan(&topo_ksg);
+        reps.push(Representation { name: "topology".into(), graph: topo_ksg, concepts: topo_concepts });
+
+        reps
+    }
+}
+
+
+
+================================================================================
+FÁJL: src/structure/graph.rs
+================================================================================
+
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct KernelStructureGraph {
+    pub nodes: Vec<Node>,
+    pub edges: Vec<Edge>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Node {
+    pub id: String,
+    pub node_type: String,
+    pub attributes: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Edge {
+    pub from: String,
+    pub to: String,
+    pub rel_type: String,
+    pub attributes: HashMap<String, String>,
+}
+
+impl KernelStructureGraph {
+    pub fn new() -> Self {
+        Self { nodes: Vec::new(), edges: Vec::new() }
+    }
+
+    pub fn add_node(&mut self, id: &str, node_type: &str) -> &mut Node {
+        let node = Node {
+            id: id.to_string(),
+            node_type: node_type.to_string(),
+            attributes: HashMap::new(),
+        };
+        self.nodes.push(node);
+        self.nodes.last_mut().unwrap()
+    }
+
+    pub fn add_edge(&mut self, from: &str, to: &str, rel_type: &str) {
+        self.edges.push(Edge {
+            from: from.to_string(),
+            to: to.to_string(),
+            rel_type: rel_type.to_string(),
+            attributes: HashMap::new(),
+        });
+    }
+
+    pub fn fingerprint(&self) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        let mut node_ids: Vec<&String> = self.nodes.iter().map(|n| &n.id).collect();
+        node_ids.sort();
+        for id in node_ids {
+            id.hash(&mut hasher);
+        }
+        let mut edge_keys: Vec<(&String, &String, &String)> = self.edges.iter()
+            .map(|e| (&e.from, &e.to, &e.rel_type)).collect();
+        edge_keys.sort();
+        for (f, t, r) in edge_keys {
+            f.hash(&mut hasher);
+            t.hash(&mut hasher);
+            r.hash(&mut hasher);
+        }
+        hasher.finish()
+    }
+}
+
+pub struct SplitMix64(pub u64);
+
+impl SplitMix64 {
+    pub fn new(seed: u64) -> Self { SplitMix64(seed) }
+    pub fn next_u64(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9E3779B97F4A7C15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
+        z ^ (z >> 31)
+    }
+    pub fn next_f64(&mut self) -> f64 {
+        (self.next_u64() >> 11) as f64 / (1u64 << 53) as f64
+    }
+}
+
+
+
+================================================================================
+FÁJL: src/structure/topology.rs
+================================================================================
+
+use crate::structure::{KernelStructureGraph, Node};
+use std::collections::{HashMap, HashSet};
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum NodeTransformation {
+    Translate { node_id: String, dx: i64, dy: i64 },
+    Recolor { node_id: String, new_color: String },
+    Delete { node_id: String },
+    Create { node_id: String, color: String, bbox_x: u64, bbox_y: u64 },
+    Rotate { node_id: String, angle: u16 },
+    Unchanged { node_id: String },
+}
+
+fn wl_iteration(graph: &KernelStructureGraph, colors: &mut HashMap<String, u64>) {
+    let mut new_colors: HashMap<String, Vec<u64>> = HashMap::new();
+    for node in &graph.nodes {
+        let mut neighbor_colors: Vec<u64> = graph.edges.iter()
+            .filter(|e| e.from == node.id || e.to == node.id)
+            .map(|e| {
+                let neighbor_id = if e.from == node.id { &e.to } else { &e.from };
+                *colors.get(neighbor_id).unwrap_or(&0)
+            })
+            .collect();
+        neighbor_colors.sort();
+        new_colors.insert(node.id.clone(), neighbor_colors);
+    }
+
+    let mut color_map: HashMap<Vec<u64>, u64> = HashMap::new();
+    let mut next_color = 1u64;
+    for node in &graph.nodes {
+        let neighbors = new_colors.get(&node.id).cloned().unwrap_or_default();
+        let new_color = *color_map.entry(neighbors).or_insert_with(|| {
+            let c = next_color;
+            next_color += 1;
+            c
+        });
+        colors.insert(node.id.clone(), new_color);
+    }
+}
+
+pub fn wl_hash(graph: &KernelStructureGraph, iterations: usize) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut colors: HashMap<String, u64> = HashMap::new();
+    for node in &graph.nodes {
+        let mut hasher = DefaultHasher::new();
+        node.node_type.hash(&mut hasher);
+        for (k, v) in &node.attributes {
+            k.hash(&mut hasher);
+            v.hash(&mut hasher);
+        }
+        colors.insert(node.id.clone(), hasher.finish());
+    }
+
+    for _ in 0..iterations {
+        wl_iteration(graph, &mut colors);
+    }
+
+    let mut sorted_colors: Vec<u64> = colors.values().cloned().collect();
+    sorted_colors.sort();
+    let mut hasher = DefaultHasher::new();
+    for c in &sorted_colors {
+        c.hash(&mut hasher);
+    }
+    let mut node_ids: Vec<&String> = graph.nodes.iter().map(|n| &n.id).collect();
+    node_ids.sort();
+    for id in node_ids {
+        if let Some(node) = graph.nodes.iter().find(|n| &n.id == id) {
+            let mut attr_keys: Vec<&String> = node.attributes.keys().collect();
+            attr_keys.sort();
+            for k in attr_keys {
+                if let Some(v) = node.attributes.get(k) {
+                    k.hash(&mut hasher);
+                    v.hash(&mut hasher);
+                }
+            }
+        }
+    }
+    hasher.finish()
+}
+
+pub fn graph_diff(
+    before: &KernelStructureGraph,
+    after: &KernelStructureGraph,
+) -> Vec<NodeTransformation> {
+    let mut transformations = Vec::new();
+    let before_nodes: HashMap<String, &Node> = before.nodes.iter().map(|n| (n.id.clone(), n)).collect();
+    let after_nodes: HashMap<String, &Node> = after.nodes.iter().map(|n| (n.id.clone(), n)).collect();
+
+    let before_ids: HashSet<&String> = before_nodes.keys().collect();
+    let after_ids: HashSet<&String> = after_nodes.keys().collect();
+
+    for id in after_ids.difference(&before_ids) {
+        if let Some(node) = after_nodes.get(*id) {
+            let color = node.attributes.get("color").cloned().unwrap_or_default();
+            let bbox_x = node.attributes.get("bbox_x").and_then(|v| v.parse().ok()).unwrap_or(0);
+            let bbox_y = node.attributes.get("bbox_y").and_then(|v| v.parse().ok()).unwrap_or(0);
+            transformations.push(NodeTransformation::Create {
+                node_id: id.to_string(),
+                color,
+                bbox_x,
+                bbox_y,
+            });
+        }
+    }
+
+    for id in before_ids.difference(&after_ids) {
+        transformations.push(NodeTransformation::Delete {
+            node_id: id.to_string(),
+        });
+    }
+
+    for id in before_ids.intersection(&after_ids) {
+        let before_node = before_nodes[*id];
+        let after_node = after_nodes[*id];
+
+        let before_color = before_node.attributes.get("color").cloned().unwrap_or_default();
+        let after_color = after_node.attributes.get("color").cloned().unwrap_or_default();
+        if before_color != after_color {
+            transformations.push(NodeTransformation::Recolor {
+                node_id: id.to_string(),
+                new_color: after_color.clone(),
+            });
+        }
+
+        let bx: i64 = before_node.attributes.get("bbox_x").and_then(|v| v.parse().ok()).unwrap_or(0);
+        let by: i64 = before_node.attributes.get("bbox_y").and_then(|v| v.parse().ok()).unwrap_or(0);
+        let ax: i64 = after_node.attributes.get("bbox_x").and_then(|v| v.parse().ok()).unwrap_or(0);
+        let ay: i64 = after_node.attributes.get("bbox_y").and_then(|v| v.parse().ok()).unwrap_or(0);
+        if bx != ax || by != ay {
+            transformations.push(NodeTransformation::Translate {
+                node_id: id.to_string(),
+                dx: ax - bx,
+                dy: ay - by,
+            });
+        }
+
+        // Rotate detektálása: ha a szélesség és magasság felcserélődött
+        if let (Some(b_w), Some(b_h), Some(a_w), Some(a_h)) = (
+            before_node.attributes.get("bbox_w").and_then(|v| v.parse::<u8>().ok()),
+            before_node.attributes.get("bbox_h").and_then(|v| v.parse::<u8>().ok()),
+            after_node.attributes.get("bbox_w").and_then(|v| v.parse::<u8>().ok()),
+            after_node.attributes.get("bbox_h").and_then(|v| v.parse::<u8>().ok()),
+        ) {
+            if b_w == a_h && b_h == a_w && b_w != b_h {
+                transformations.push(NodeTransformation::Rotate {
+                    node_id: id.to_string(),
+                    angle: 90,
+                });
+            }
+        }
+
+        if before_color == after_color && bx == ax && by == ay {
+            // Csak akkor Unchanged, ha semmi más nem változott
+            let w_changed = before_node.attributes.get("bbox_w") != after_node.attributes.get("bbox_w");
+            let h_changed = before_node.attributes.get("bbox_h") != after_node.attributes.get("bbox_h");
+            let rotated = w_changed && h_changed && 
+                before_node.attributes.get("bbox_w") == after_node.attributes.get("bbox_h") &&
+                before_node.attributes.get("bbox_h") == after_node.attributes.get("bbox_w");
+            if !rotated {
+                transformations.push(NodeTransformation::Unchanged {
+                    node_id: id.to_string(),
+                });
+            }
+        }
+    }
+
+    transformations
+}
+
+
+
+
+================================================================================
+FÁJL: src/sandbox/operators.rs
+================================================================================
+
+use crate::adapter::arc::adapter::ArcGrid;
+use crate::structure::KernelStructureGraph;
+use std::collections::HashMap;
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Transformation {
+    Translate { node_id: String, dx: i64, dy: i64 },
+    Recolor { node_id: String, new_color: String },
+    Delete { node_id: String },
+    Create { color: String, bbox_x: u64, bbox_y: u64, bbox_w: u8, bbox_h: u8 },
+    Merge { node_a: String, node_b: String },
+    Split { node_id: String },
+    RecolorToTarget { node_id: String },
+    TranslateToTarget { node_id: String },
+    Rotate { node_id: String, angle: u16 },
+    NoOp,
+}
+
+pub fn apply_transformation(graph: &KernelStructureGraph, transform: &Transformation) -> KernelStructureGraph {
+    let mut new_graph = graph.clone();
+    
+    match transform {
+        Transformation::Translate { node_id, dx, dy } => {
+            if let Some(node) = new_graph.nodes.iter_mut().find(|n| &n.id == node_id) {
+                if let (Some(x_str), Some(y_str)) = (
+                    node.attributes.get("bbox_x").cloned(),
+                    node.attributes.get("bbox_y").cloned(),
+                ) {
+                    if let (Ok(x), Ok(y)) = (x_str.parse::<i64>(), y_str.parse::<i64>()) {
+                        let new_x = (x + dx).max(0);
+                        let new_y = (y + dy).max(0);
+                        node.attributes.insert("bbox_x".to_string(), new_x.to_string());
+                        node.attributes.insert("bbox_y".to_string(), new_y.to_string());
+                    }
+                }
+            }
+        }
+        Transformation::Recolor { node_id, new_color } => {
+            if let Some(node) = new_graph.nodes.iter_mut().find(|n| &n.id == node_id) {
+                node.attributes.insert("color".to_string(), new_color.clone());
+            }
+        }
+        Transformation::Delete { node_id } => {
+            new_graph.nodes.retain(|n| &n.id != node_id);
+            new_graph.edges.retain(|e| &e.from != node_id && &e.to != node_id);
+        }
+        Transformation::Create { color, bbox_x, bbox_y, bbox_w, bbox_h } => {
+            let node_id = format!("obj_{}", new_graph.nodes.len());
+            let mut attrs = HashMap::new();
+            attrs.insert("color".to_string(), color.clone());
+            attrs.insert("bbox_x".to_string(), bbox_x.to_string());
+            attrs.insert("bbox_y".to_string(), bbox_y.to_string());
+            attrs.insert("bbox_w".to_string(), bbox_w.to_string());
+            attrs.insert("bbox_h".to_string(), bbox_h.to_string());
+            attrs.insert("area".to_string(), ((*bbox_w as u64) * (*bbox_h as u64)).to_string());
+            let mut shape_mask = Vec::new();
+            for dx in 0..*bbox_w {
+                for dy in 0..*bbox_h {
+                    shape_mask.push(format!("{},{}", dx, dy));
+                }
+            }
+            attrs.insert("shape_mask".to_string(), shape_mask.join(";"));
+            new_graph.add_node(&node_id, "arc_object");
+            if let Some(node) = new_graph.nodes.last_mut() {
+                node.attributes = attrs;
+            }
+        }
+        Transformation::Merge { node_a, node_b } => {
+            let b_attrs = new_graph.nodes.iter()
+                .find(|n| &n.id == node_b)
+                .map(|n| n.attributes.clone());
+            if let Some(b_attr) = b_attrs {
+                if let Some(node_a) = new_graph.nodes.iter_mut().find(|n| &n.id == node_a) {
+                    if let (Some(ax), Some(ay), Some(aw), Some(ah), Some(bx), Some(by), Some(bw), Some(bh)) = (
+                        node_a.attributes.get("bbox_x").and_then(|v| v.parse::<u64>().ok()),
+                        node_a.attributes.get("bbox_y").and_then(|v| v.parse::<u64>().ok()),
+                        node_a.attributes.get("bbox_w").and_then(|v| v.parse::<u64>().ok()),
+                        node_a.attributes.get("bbox_h").and_then(|v| v.parse::<u64>().ok()),
+                        b_attr.get("bbox_x").and_then(|v| v.parse::<u64>().ok()),
+                        b_attr.get("bbox_y").and_then(|v| v.parse::<u64>().ok()),
+                        b_attr.get("bbox_w").and_then(|v| v.parse::<u64>().ok()),
+                        b_attr.get("bbox_h").and_then(|v| v.parse::<u64>().ok()),
+                    ) {
+                        let new_x = ax.min(bx);
+                        let new_y = ay.min(by);
+                        let new_w = (ax + aw).max(bx + bw) - new_x;
+                        let new_h = (ay + ah).max(by + bh) - new_y;
+                        node_a.attributes.insert("bbox_x".to_string(), new_x.to_string());
+                        node_a.attributes.insert("bbox_y".to_string(), new_y.to_string());
+                        node_a.attributes.insert("bbox_w".to_string(), new_w.to_string());
+                        node_a.attributes.insert("bbox_h".to_string(), new_h.to_string());
+                    }
+                }
+                new_graph.nodes.retain(|n| &n.id != node_b);
+                new_graph.edges.retain(|e| &e.from != node_b && &e.to != node_b);
+            }
+        }
+        Transformation::Split { node_id } => {
+            if let Some(node) = new_graph.nodes.iter().find(|n| &n.id == node_id).cloned() {
+                let color = node.attributes.get("color").cloned().unwrap_or("1".to_string());
+                let bx = node.attributes.get("bbox_x").and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
+                let by = node.attributes.get("bbox_y").and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
+                let bw = node.attributes.get("bbox_w").and_then(|v| v.parse::<u8>().ok()).unwrap_or(1);
+                let bh = node.attributes.get("bbox_h").and_then(|v| v.parse::<u8>().ok()).unwrap_or(1);
+                let half_w = bw.max(1) / 2;
+                if half_w > 0 {
+                    let mut attrs1 = HashMap::new();
+                    attrs1.insert("color".to_string(), color.clone());
+                    attrs1.insert("bbox_x".to_string(), bx.to_string());
+                    attrs1.insert("bbox_y".to_string(), by.to_string());
+                    attrs1.insert("bbox_w".to_string(), half_w.to_string());
+                    attrs1.insert("bbox_h".to_string(), bh.to_string());
+                    let id1 = format!("obj_{}", new_graph.nodes.len());
+                    new_graph.add_node(&id1, "arc_object");
+                    if let Some(new_node) = new_graph.nodes.last_mut() { new_node.attributes = attrs1; }
+                    
+                    let mut attrs2 = HashMap::new();
+                    attrs2.insert("color".to_string(), color);
+                    attrs2.insert("bbox_x".to_string(), (bx + half_w as u64).to_string());
+                    attrs2.insert("bbox_y".to_string(), by.to_string());
+                    attrs2.insert("bbox_w".to_string(), (bw - half_w).to_string());
+                    attrs2.insert("bbox_h".to_string(), bh.to_string());
+                    let id2 = format!("obj_{}", new_graph.nodes.len());
+                    new_graph.add_node(&id2, "arc_object");
+                    if let Some(new_node) = new_graph.nodes.last_mut() { new_node.attributes = attrs2; }
+                }
+                new_graph.nodes.retain(|n| &n.id != node_id);
+                new_graph.edges.retain(|e| &e.from != node_id && &e.to != node_id);
+            }
+        }
+        Transformation::RecolorToTarget { .. } | Transformation::TranslateToTarget { .. } => {
+            // Absztrakt operátorok, a PolicyEngine oldja fel
+        }
+        Transformation::Rotate { node_id, angle } => {
+            if let Some(node) = new_graph.nodes.iter_mut().find(|n| n.id == *node_id) {
+                if let (Some(w_str), Some(h_str)) = (
+                    node.attributes.get("bbox_w").cloned(),
+                    node.attributes.get("bbox_h").cloned(),
+                ) {
+                    if let (Ok(w), Ok(h)) = (w_str.parse::<u8>(), h_str.parse::<u8>()) {
+                        if *angle == 90 || *angle == 270 {
+                            // Bbox csere
+                            node.attributes.insert("bbox_w".to_string(), h.to_string());
+                            node.attributes.insert("bbox_h".to_string(), w.to_string());
+                            
+                            // Shape_mask forgatása
+                            if let Some(mask_str) = node.attributes.get("shape_mask").cloned() {
+                                let mut new_mask = Vec::new();
+                                for part in mask_str.split(';') {
+                                    let mut coords = part.split(',');
+                                    if let (Some(dx_str), Some(dy_str)) = (coords.next(), coords.next()) {
+                                        if let (Ok(dx), Ok(dy)) = (dx_str.parse::<u8>(), dy_str.parse::<u8>()) {
+                                            // 90 fokos forgatás: (dx, dy) -> (dy, w - 1 - dx)
+                                            let new_dx = dy;
+                                            let new_dy = w - 1 - dx;
+                                            new_mask.push(format!("{},{}", new_dx, new_dy));
+                                        }
+                                    }
+                                }
+                                if !new_mask.is_empty() {
+                                    node.attributes.insert("shape_mask".to_string(), new_mask.join(";"));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Transformation::NoOp => {}
+    }
+    
+    new_graph
+}
+
+pub fn simulate_plan(graph: &KernelStructureGraph, plan: &[Transformation]) -> Vec<KernelStructureGraph> {
+    let mut states = vec![graph.clone()];
+    let mut current = graph.clone();
+    for transform in plan {
+        current = apply_transformation(&current, transform);
+        states.push(current.clone());
+    }
+    states
+}
+
+
+/// Alkalmaz egy transzformációt egy ArcGrid-re (a KSG helyett közvetlenül).
+pub fn apply_transformation_to_grid(grid: &ArcGrid, transformation: &Transformation) -> Option<ArcGrid> {
+    let ksg = crate::adapter::arc::adapter::ArcAdapter::grid_to_ksg(grid);
+    let new_ksg = apply_transformation(&ksg, transformation);
+    Some(crate::adapter::arc::adapter::ArcAdapter::ksg_to_grid(&new_ksg, grid.width, grid.height, 0))
+}
+
+
+
+================================================================================
+FÁJL: src/concept/mod.rs
+================================================================================
+
+pub mod detectors;
+
+use crate::structure::KernelStructureGraph;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Concept {
+    Hole,
+    Border,
+    Cross,
+    Symmetry,
+    Connected,
+    Largest,
+    Smallest,
+    Player,
+    Exit,
+    Key,
+    Door,
+    Button,
+    Obstacle,
+}
+
+pub trait ConceptDetector {
+    fn detect(&self, graph: &KernelStructureGraph) -> Vec<Concept>;
+}
+
+pub struct ConceptRegistry {
+    detectors: Vec<Box<dyn ConceptDetector>>,
+    learned_concepts: Vec<Concept>,
+}
+
+impl Clone for ConceptRegistry {
+    fn clone(&self) -> Self {
+        Self {
+            detectors: Vec::new(), // statikus detektorokat nem klónozunk
+            learned_concepts: self.learned_concepts.clone(),
+        }
+    }
+}
+
+impl ConceptRegistry {
+    pub fn new() -> Self { Self { detectors: Vec::new(), learned_concepts: Vec::new() } }
+    pub fn add_detector(&mut self, det: Box<dyn ConceptDetector>) { self.detectors.push(det); }
+    pub fn add_concept(&mut self, concept: Concept) { self.learned_concepts.push(concept); }
+    pub fn scan(&self, graph: &KernelStructureGraph) -> Vec<Concept> {
+        let mut results = Vec::new();
+        for det in &self.detectors { results.extend(det.detect(graph)); }
+        results.extend(self.learned_concepts.clone());
+        results.sort(); results.dedup(); results
+    }
+}
+
+impl Default for ConceptRegistry {
+    fn default() -> Self {
+        let mut reg = Self::new();
+        reg.add_detector(Box::new(detectors::BorderDetector));
+        reg.add_detector(Box::new(detectors::HoleDetector));
+        reg.add_detector(Box::new(detectors::SymmetryDetector));
+        reg.add_detector(Box::new(detectors::LargestObjectDetector));
+        reg.add_detector(Box::new(detectors::CrossDetector));
+        reg.add_detector(Box::new(detectors::RoleDetector));
+        reg.add_detector(Box::new(detectors::MirrorDetector));
+        reg.add_detector(Box::new(detectors::ContainmentDetector));
+        reg.add_detector(Box::new(detectors::AdjacencyDetector));
+        reg.add_detector(Box::new(detectors::PatternDetector));
+        reg.add_detector(Box::new(detectors::CausalityDetector));
+        reg.add_detector(Box::new(detectors::SequenceDetector));
+        reg.add_detector(Box::new(detectors::CountDetector));
+        reg.add_detector(Box::new(detectors::FillDetector));
+        reg
+    }
+}
+
+
+
+================================================================================
+FÁJL: src/concept/detectors.rs
+================================================================================
+
+use super::Concept;
+use crate::structure::KernelStructureGraph;
+use std::collections::HashSet;
+
+pub struct BorderDetector;
+impl super::ConceptDetector for BorderDetector {
+    fn detect(&self, graph: &KernelStructureGraph) -> Vec<Concept> {
+        if graph.nodes.iter().any(|n| n.attributes.get("role").map_or(false, |v| v == "border")) {
+            vec![Concept::Border]
+        } else { vec![] }
+    }
+}
+
+pub struct HoleDetector;
+impl super::ConceptDetector for HoleDetector {
+    fn detect(&self, graph: &KernelStructureGraph) -> Vec<Concept> {
+        if graph.nodes.iter().any(|n| n.attributes.get("shape").map_or(false, |v| v == "hole")) {
+            return vec![Concept::Hole];
+        }
+        for edge in &graph.edges {
+            if edge.rel_type == "contains" {
+                let inner = graph.nodes.iter().find(|n| n.id == edge.to);
+                let outer = graph.nodes.iter().find(|n| n.id == edge.from);
+                if let (Some(inner), Some(outer)) = (inner, outer) {
+                    let inner_area: usize = inner.attributes.get("area").and_then(|v| v.parse().ok()).unwrap_or(0);
+                    let outer_area: usize = outer.attributes.get("area").and_then(|v| v.parse().ok()).unwrap_or(0);
+                    if inner_area > 0 && inner_area < outer_area {
+                        return vec![Concept::Hole];
+                    }
+                }
+            }
+        }
+        vec![]
+    }
+}
+
+pub struct SymmetryDetector;
+impl super::ConceptDetector for SymmetryDetector {
+    fn detect(&self, graph: &KernelStructureGraph) -> Vec<Concept> {
+        if graph.nodes.iter().any(|n| n.attributes.contains_key("symmetry")) {
+            vec![Concept::Symmetry]
+        } else { vec![] }
+    }
+}
+
+pub struct LargestObjectDetector;
+impl super::ConceptDetector for LargestObjectDetector {
+    fn detect(&self, graph: &KernelStructureGraph) -> Vec<Concept> {
+        let largest = graph.nodes.iter()
+            .filter(|n| n.node_type == "arc_object")
+            .max_by_key(|n| n.attributes.get("area").and_then(|v| v.parse::<usize>().ok()).unwrap_or(0));
+        if largest.is_some() { vec![Concept::Largest] } else { vec![] }
+    }
+}
+
+pub struct CrossDetector;
+impl super::ConceptDetector for CrossDetector {
+    fn detect(&self, graph: &KernelStructureGraph) -> Vec<Concept> {
+        for node in &graph.nodes {
+            if let Some(mask_str) = node.attributes.get("shape_mask") {
+                let pixels: HashSet<(i32,i32)> = mask_str.split(';')
+                    .filter_map(|s| {
+                        let mut it = s.split(',');
+                        let dx: i32 = it.next()?.parse().ok()?;
+                        let dy: i32 = it.next()?.parse().ok()?;
+                        Some((dx, dy))
+                    }).collect();
+                let has_cross = (0..5).all(|i| pixels.contains(&(i,2)))
+                    && (0..5).all(|i| pixels.contains(&(2,i)));
+                if has_cross && pixels.len() >= 5 {
+                    return vec![Concept::Cross];
+                }
+            }
+        }
+        vec![]
+    }
+}
+
+pub struct RoleDetector;
+impl super::ConceptDetector for RoleDetector {
+    fn detect(&self, graph: &KernelStructureGraph) -> Vec<Concept> {
+        let mut res = Vec::new();
+        for n in &graph.nodes {
+            if let Some(role) = n.attributes.get("role") {
+                match role.as_str() {
+                    "player" => res.push(Concept::Player),
+                    "exit" => res.push(Concept::Exit),
+                    "key" => res.push(Concept::Key),
+                    "door" => res.push(Concept::Door),
+                    "button" => res.push(Concept::Button),
+                    "obstacle" => res.push(Concept::Obstacle),
+                    _ => {}
+                }
+            }
+        }
+        res
+    }
+}
+
+// --- Új detektorok ---
+
+pub struct MirrorDetector;
+impl super::ConceptDetector for MirrorDetector {
+    fn detect(&self, graph: &crate::structure::KernelStructureGraph) -> Vec<super::Concept> {
+        let mut has_symmetry = false;
+        // Egyszerű heurisztika: ha van két azonos méretű és színű objektum, amik egymás tükörképei
+        let objects: Vec<_> = graph.nodes.iter()
+            .filter(|n| n.node_type == "arc_object")
+            .collect();
+        
+        for i in 0..objects.len() {
+            for j in (i+1)..objects.len() {
+                let a = &objects[i];
+                let b = &objects[j];
+                if a.attributes.get("color") == b.attributes.get("color") &&
+                   a.attributes.get("area") == b.attributes.get("area") {
+                    // Ellenőrizzük a tükrözést a bbox koordináták alapján
+                    if let (Some(ax), Some(bx), Some(aw), Some(bw)) = (
+                        a.attributes.get("bbox_x").and_then(|v| v.parse::<i64>().ok()),
+                        b.attributes.get("bbox_x").and_then(|v| v.parse::<i64>().ok()),
+                        a.attributes.get("bbox_w").and_then(|v| v.parse::<i64>().ok()),
+                        b.attributes.get("bbox_w").and_then(|v| v.parse::<i64>().ok()),
+                    ) {
+                        if (ax + aw == bx) || (bx + bw == ax) {
+                            has_symmetry = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            if has_symmetry { break; }
+        }
+        if has_symmetry { vec![super::Concept::Symmetry] } else { vec![] }
+    }
+}
+
+pub struct ContainmentDetector;
+impl super::ConceptDetector for ContainmentDetector {
+    fn detect(&self, graph: &crate::structure::KernelStructureGraph) -> Vec<super::Concept> {
+        for edge in &graph.edges {
+            if edge.rel_type == "contains" {
+                return vec![super::Concept::Hole]; // A tartalmazás gyakran lyukat jelez
+            }
+        }
+        vec![]
+    }
+}
+
+pub struct AdjacencyDetector;
+impl super::ConceptDetector for AdjacencyDetector {
+    fn detect(&self, graph: &crate::structure::KernelStructureGraph) -> Vec<super::Concept> {
+        for edge in &graph.edges {
+            if edge.rel_type == "touches" {
+                return vec![super::Concept::Connected];
+            }
+        }
+        vec![]
+    }
+}
+
+pub struct PatternDetector;
+impl super::ConceptDetector for PatternDetector {
+    fn detect(&self, graph: &crate::structure::KernelStructureGraph) -> Vec<super::Concept> {
+        // Ismétlődő minta: ha van két azonos alakú objektum
+        let mut masks = std::collections::HashSet::new();
+        for node in &graph.nodes {
+            if let Some(mask) = node.attributes.get("shape_mask") {
+                if !masks.insert(mask.clone()) {
+                    // Ez a maszk már szerepelt, tehát ismétlődés van
+                    return vec![super::Concept::Connected]; // Újrahasználjuk a Connected fogalmat
+                }
+            }
+        }
+        vec![]
+    }
+}
+
+pub struct CausalityDetector;
+impl super::ConceptDetector for CausalityDetector {
+    fn detect(&self, graph: &crate::structure::KernelStructureGraph) -> Vec<super::Concept> {
+        // Ok-okozat: ha van recolor és translate ugyanazon az objektumon
+        for node in &graph.nodes {
+            let has_recolor = node.attributes.contains_key("old_color") || node.attributes.contains_key("new_color");
+            let has_translate = node.attributes.contains_key("dx") || node.attributes.contains_key("dy");
+            if has_recolor && has_translate {
+                return vec![super::Concept::Player]; // Mozgó, változó objektum
+            }
+        }
+        vec![]
+    }
+}
+
+pub struct SequenceDetector;
+impl super::ConceptDetector for SequenceDetector {
+    fn detect(&self, graph: &crate::structure::KernelStructureGraph) -> Vec<super::Concept> {
+        // Szekvencia: ha több azonos típusú transzformáció van
+        let mut transform_count = std::collections::HashMap::new();
+        for node in &graph.nodes {
+            if let Some(action) = node.attributes.get("action") {
+                *transform_count.entry(action.clone()).or_insert(0) += 1;
+            }
+        }
+        for (_, count) in transform_count {
+            if count >= 3 {
+                return vec![super::Concept::Connected]; // Ismétlődő minta
+            }
+        }
+        vec![]
+    }
+}
+
+pub struct CountDetector;
+impl super::ConceptDetector for CountDetector {
+    fn detect(&self, graph: &crate::structure::KernelStructureGraph) -> Vec<super::Concept> {
+        let object_count = graph.nodes.iter()
+            .filter(|n| n.node_type == "arc_object")
+            .count();
+        if object_count > 0 {
+            // A count önmagában nem egy fogalom, de a legnagyobbat detektáljuk
+            if object_count > 2 {
+                return vec![super::Concept::Largest];
+            }
+        }
+        vec![]
+    }
+}
+
+pub struct FillDetector;
+impl super::ConceptDetector for FillDetector {
+    fn detect(&self, graph: &crate::structure::KernelStructureGraph) -> Vec<super::Concept> {
+        // Kitöltés: ha egy objektum tartalmaz egy másikat, ami kisebb területű
+        for edge in &graph.edges {
+            if edge.rel_type == "contains" {
+                let inner = graph.nodes.iter().find(|n| n.id == edge.to);
+                let outer = graph.nodes.iter().find(|n| n.id == edge.from);
+                if let (Some(inner), Some(outer)) = (inner, outer) {
+                    let inner_area: usize = inner.attributes.get("area").and_then(|v| v.parse().ok()).unwrap_or(0);
+                    let outer_area: usize = outer.attributes.get("area").and_then(|v| v.parse().ok()).unwrap_or(0);
+                    if inner_area > 0 && inner_area < outer_area {
+                        return vec![super::Concept::Hole, super::Concept::Border];
+                    }
+                }
+            }
+        }
+        vec![]
+    }
+}
+
+
+
+================================================================================
+FÁJL: src/concept_learner.rs
+================================================================================
+
+use crate::structure::KernelStructureGraph;
+use crate::structure::topology::graph_diff;
+use crate::concept::{Concept, ConceptDetector, ConceptRegistry};
+use std::collections::HashMap;
+
+struct ColorDetector {
+    color: String,
+    concept: Concept,
+}
+
+impl ConceptDetector for ColorDetector {
+    fn detect(&self, graph: &KernelStructureGraph) -> Vec<Concept> {
+        if graph.nodes.iter().any(|n| n.attributes.get("color").map_or(false, |c| c == &self.color)) {
+            vec![self.concept.clone()]
+        } else {
+            vec![]
+        }
+    }
+}
+
+pub struct ConceptLearner {
+    pub discovered: Vec<Concept>,
+    pattern_counts: HashMap<String, usize>,
+}
+
+impl ConceptLearner {
+    pub fn new() -> Self {
+        Self {
+            discovered: Vec::new(),
+            pattern_counts: HashMap::new(),
+        }
+    }
+
+    pub fn learn_from_diff(
+        &mut self,
+        before: &KernelStructureGraph,
+        after: &KernelStructureGraph,
+        registry: &mut ConceptRegistry,
+    ) -> Vec<Concept> {
+        let diffs = graph_diff(before, after);
+        let mut new_concepts = Vec::new();
+
+        for diff in &diffs {
+            match diff {
+                crate::structure::topology::NodeTransformation::Unchanged { .. } => {}
+                _ => {
+                    if let Some(pattern) = Self::extract_pattern(diff) {
+                        let count = self.pattern_counts.entry(pattern.clone()).or_insert(0);
+                        *count += 1;
+                        if *count >= 2 {
+                            if let Some(concept) = Self::pattern_to_concept(&pattern) {
+                                if !registry.scan(after).contains(&concept) {
+                                    new_concepts.push(concept.clone());
+                                    self.discovered.push(concept.clone());
+                                    if let Some(detector) = Self::create_detector(&pattern, concept.clone()) {
+                                        registry.add_detector(Box::new(detector));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        new_concepts
+    }
+
+    fn extract_pattern(diff: &crate::structure::topology::NodeTransformation) -> Option<String> {
+        match diff {
+            crate::structure::topology::NodeTransformation::Create { color, .. } => {
+                Some(format!("create_{}", color))
+            }
+            crate::structure::topology::NodeTransformation::Recolor { new_color, .. } => {
+                Some(format!("recolor_{}", new_color))
+            }
+            crate::structure::topology::NodeTransformation::Translate { .. } => {
+                Some("translate".to_string())
+            }
+            crate::structure::topology::NodeTransformation::Rotate { .. } => {
+                Some("rotate".to_string())
+            }
+            crate::structure::topology::NodeTransformation::Delete { .. } => {
+                Some("delete".to_string())
+            }
+            _ => None,
+        }
+    }
+
+    fn pattern_to_concept(pattern: &str) -> Option<Concept> {
+        if pattern.contains("create") {
+            Some(Concept::Connected)
+        } else if pattern.contains("recolor") {
+            Some(Concept::Symmetry)
+        } else if pattern.contains("translate") {
+            Some(Concept::Player)
+        } else {
+            None
+        }
+    }
+
+    fn create_detector(pattern: &str, concept: Concept) -> Option<ColorDetector> {
+        let parts: Vec<&str> = pattern.split('_').collect();
+        if parts.len() >= 2 {
+            let color = parts[1..].join("_");
+            Some(ColorDetector { color, concept })
+        } else {
+            None
+        }
+    }
+}
+
+
+
+================================================================================
+FÁJL: src/agent/agent_loop.rs
+================================================================================
+
+use crate::hypothesis_bus::HypothesisBus;
+use crate::abstraction::program::{Program, ProgramSynthesizer};
+use crate::adapter::arc::adapter::ArcGrid;
+
+pub trait Environment {
+    fn step(&mut self, action: &str) -> Result<(ArcGrid, ArcGrid), String>;
+    fn reset(&mut self) -> ArcGrid;
+}
+
+pub struct AgentLoop {
+    pub hypothesis_bus: HypothesisBus,
+    pub synthesizer: ProgramSynthesizer,
+    pub learned_program: Option<Program>,
+}
+
+impl AgentLoop {
+    pub fn new() -> Self {
+        Self {
+            hypothesis_bus: HypothesisBus::new(),
+            synthesizer: ProgramSynthesizer::new(),
+            learned_program: None,
+        }
+    }
+
+    pub fn run_episode(&mut self, env: &mut dyn Environment, max_steps: usize) -> Result<Program, String> {
+        let obs = env.reset();
+        for _step in 0..max_steps {
+            if let Ok((_new_obs, target_grid)) = env.step("solve") {
+                let obs_ksg = crate::adapter::arc::adapter::ArcAdapter::grid_to_ksg(&obs);
+                let target_ksg = crate::adapter::arc::adapter::ArcAdapter::grid_to_ksg(&target_grid);
+                if let Some(program) = self.synthesizer.learn_from_example(&obs_ksg, &target_ksg) {
+                    self.learned_program = Some(program.clone());
+                    return Ok(program);
+                }
+            }
+        }
+        Err("Failed to learn program within max steps".into())
+    }
+}
+
+
+
+================================================================================
+FÁJL: src/agent/explorer.rs
+================================================================================
+
+use crate::structure::KernelStructureGraph;
+use crate::sandbox::operators::{Transformation, apply_transformation};
+use crate::abstraction::program::ProgramSynthesizer;
+use crate::adapter::arc::adapter::ArcGrid;
+use rand::seq::SliceRandom;
+use rand::thread_rng;
+use std::collections::HashMap;
+
+pub struct ExplorerAgent {
+    pub synthesizer: ProgramSynthesizer,
+    pub world_model: HashMap<(u64, String), KernelStructureGraph>,
+    pub action_history: Vec<(KernelStructureGraph, String, KernelStructureGraph)>,
+    rng: rand::rngs::ThreadRng,
+}
+
+impl ExplorerAgent {
+    pub fn new() -> Self {
+        Self {
+            synthesizer: ProgramSynthesizer::new(),
+            world_model: HashMap::new(),
+            action_history: Vec::new(),
+            rng: thread_rng(),
+        }
+    }
+
+    pub fn possible_actions(&self, graph: &KernelStructureGraph) -> Vec<String> {
+        let mut actions = Vec::new();
+        for node in &graph.nodes {
+            if node.node_type == "arc_object" {
+                actions.push(format!("translate_{}_0_-1", node.id));
+                actions.push(format!("translate_{}_0_1", node.id));
+                actions.push(format!("translate_{}_-1_0", node.id));
+                actions.push(format!("translate_{}_1_0", node.id));
+            }
+        }
+        actions
+    }
+
+    pub fn parse_action(&self, action: &str, _graph: &KernelStructureGraph) -> Option<Transformation> {
+        let parts: Vec<&str> = action.split('_').collect();
+        if parts.len() >= 4 && parts[0] == "translate" {
+            let dy: i64 = parts.last()?.parse().ok()?;
+            let dx: i64 = parts.get(parts.len()-2)?.parse().ok()?;
+            let node_id = parts[1..parts.len()-2].join("_");
+            Some(Transformation::Translate { node_id, dx, dy })
+        } else {
+            None
+        }
+    }
+
+    pub fn try_action(&self, graph: &KernelStructureGraph, action: &str) -> Result<KernelStructureGraph, String> {
+        if let Some(transform) = self.parse_action(action, graph) {
+            let new_graph = apply_transformation(graph, &transform);
+            for node in &new_graph.nodes {
+                if let (Some(x), Some(y)) = (node.attributes.get("bbox_x"), node.attributes.get("bbox_y")) {
+                    let x: i64 = x.parse().unwrap_or(0);
+                    let y: i64 = y.parse().unwrap_or(0);
+                    if x < 0 || y < 0 { return Err("out of bounds".into()); }
+                }
+            }
+            Ok(new_graph)
+        } else {
+            Err("unknown action".into())
+        }
+    }
+
+    pub fn explore_to_target(
+        &mut self,
+        start_grid: &ArcGrid,
+        target_grid: &ArcGrid,
+        max_steps: usize,
+    ) -> Result<Vec<String>, String> {
+        let start_ksg = crate::adapter::arc::adapter::ArcAdapter::grid_to_ksg(start_grid);
+        let target_ksg = crate::adapter::arc::adapter::ArcAdapter::grid_to_ksg(target_grid);
+        let mut current = start_ksg.clone();
+        let mut plan = Vec::new();
+
+        for _ in 0..max_steps {
+            let fp = current.fingerprint();
+            if let Some(program) = self.synthesizer.find_best_program(&current, &target_ksg) {
+                let mut temp = current.clone();
+                for step in &program.steps {
+                    temp = apply_transformation(&temp, step);
+                    plan.push(format!("{:?}", step));
+                }
+                if temp.nodes == target_ksg.nodes {
+                    return Ok(plan);
+                }
+            }
+
+            let actions = self.possible_actions(&current);
+            if actions.is_empty() { break; }
+            let action = actions.choose(&mut self.rng).unwrap().clone();
+            if let Ok(new_ksg) = self.try_action(&current, &action) {
+                self.world_model.insert((fp, action.clone()), new_ksg.clone());
+                self.action_history.push((current.clone(), action.clone(), new_ksg.clone()));
+                plan.push(action.clone());
+                current = new_ksg;
+                if current.nodes == target_ksg.nodes {
+                    self.synthesizer.learn_from_example(&start_ksg, &current);
+                    return Ok(plan);
+                }
+            }
+        }
+        Err("failed to reach target".into())
+    }
+}
+
+
+
+================================================================================
+FÁJL: src/meta_learner.rs
+================================================================================
+
+use crate::agent::agent_loop::{AgentLoop, Environment};
+use crate::agent::explorer::ExplorerAgent;
+use crate::abstraction::program::ProgramSynthesizer;
+use crate::abstraction::hypothesis::HypothesisManager;
+use crate::abstraction::goal_decomposer::GoalDecomposer;
+use crate::concept::{ConceptRegistry, Concept};
+use crate::concept_learner::ConceptLearner;
+use crate::adapter::arc::adapter::{ArcGrid, ArcAdapter};
+use std::collections::HashMap;
+
+pub struct TaskInstance {
+    pub grid: ArcGrid,
+    pub target: ArcGrid,
+}
+
+pub struct MetaLearner {
+    pub agent: AgentLoop,
+    pub explorer: ExplorerAgent,
+    pub hypothesis_manager: HypothesisManager,
+    pub program_synthesizer: ProgramSynthesizer,
+    pub concept_registry: ConceptRegistry,
+    pub concept_learner: ConceptLearner,
+    pub task_stats: HashMap<String, (u32, u32)>,
+}
+
+impl MetaLearner {
+    pub fn new() -> Self {
+        Self {
+            agent: AgentLoop::new(),
+            explorer: ExplorerAgent::new(),
+            hypothesis_manager: HypothesisManager::new(),
+            program_synthesizer: ProgramSynthesizer::new(),
+            concept_registry: ConceptRegistry::default(),
+            concept_learner: ConceptLearner::new(),
+            task_stats: HashMap::new(),
+        }
+    }
+
+    pub fn learn_from_task(&mut self, task: TaskInstance) -> bool {
+        // 1. Próbáljuk meg tanulni a transzformációt (AgentLoop vagy ExplorerAgent)
+        struct OneShotEnv {
+            obs: ArcGrid,
+            target: ArcGrid,
+            solved: bool,
+        }
+        impl Environment for OneShotEnv {
+            fn step(&mut self, action: &str) -> Result<(ArcGrid, ArcGrid), String> {
+                if action == "solve" && !self.solved {
+                    self.solved = true;
+                    Ok((self.obs.clone(), self.target.clone()))
+                } else {
+                    Err("already solved or unknown action".into())
+                }
+            }
+            fn reset(&mut self) -> ArcGrid { self.obs.clone() }
+        }
+
+        let mut env = OneShotEnv { obs: task.grid.clone(), target: task.target.clone(), solved: false };
+        let _ = self.agent.run_episode(&mut env, 5);
+        if self.explorer.explore_to_target(&task.grid, &task.target, 20).is_ok() {
+            // explorer sikeres volt, de a programot a diffből tanuljuk
+            let input_ksg = ArcAdapter::grid_to_ksg(&task.grid);
+            let target_ksg = ArcAdapter::grid_to_ksg(&task.target);
+            self.program_synthesizer.learn_from_example(&input_ksg, &target_ksg);
+        } else {
+            // Ha az explorer sem járt sikerrel, akkor is tanulunk a diffből (lehet, hogy részleges)
+            let input_ksg = ArcAdapter::grid_to_ksg(&task.grid);
+            let target_ksg = ArcAdapter::grid_to_ksg(&task.target);
+            self.program_synthesizer.learn_from_example(&input_ksg, &target_ksg);
+        }
+
+        // 2. Pixel‑szintű validáció a legjobb programmal
+        let input_ksg = ArcAdapter::grid_to_ksg(&task.grid);
+        let target_ksg = ArcAdapter::grid_to_ksg(&task.target);
+        if let Some(best_prog) = self.program_synthesizer.find_best_program(&input_ksg, &target_ksg) {
+            let result_ksg = best_prog.apply(&input_ksg);
+            let result_grid = ArcAdapter::ksg_to_grid(&result_ksg, task.target.width, task.target.height, 0);
+            if result_grid.pixels == task.target.pixels {
+                // Valódi siker
+                self.hypothesis_manager.process_grid(&task.grid, &mut self.program_synthesizer, Some(&target_ksg));
+                let rep_name = self.hypothesis_manager.best_hypothesis().map(|h| h.representation_name.clone());
+                if let Some(name) = rep_name {
+                    self.hypothesis_manager.record_success(&name);
+                }
+        if self.program_synthesizer.programs.len() > 200 {
+            self.program_synthesizer.consolidate();
+        }
+                self.analyze_and_adapt(&task.grid, &task.target);
+                let key = "agent_one_shot".to_string();
+                let entry = self.task_stats.entry(key).or_insert((0,0));
+                entry.0 += 1; entry.1 += 1;
+                return true;
+            }
+        }
+
+        // 3. Ha nem sikerült, akkor is adaptálódunk, de sikertelenként jelöljük
+        if self.program_synthesizer.programs.len() > 200 {
+            self.program_synthesizer.consolidate();
+        }
+        self.analyze_and_adapt(&task.grid, &task.target);
+        let key = "agent_one_shot".to_string();
+        let entry = self.task_stats.entry(key).or_insert((0,0));
+        entry.1 += 1;
+        false
+    }
+
+    pub fn learn_interactive(&mut self, env: &mut dyn Environment, max_episodes: usize) -> Result<f64, String> {
+        let mut total_success = 0u32;
+        let mut total_attempts = 0u32;
+
+        for _ep in 0..max_episodes {
+            total_attempts += 1;
+            let obs = env.reset();
+            let mut current_ksg = ArcAdapter::grid_to_ksg(&obs);
+            for _step in 0..10 {
+                let actions = self.explorer.possible_actions(&current_ksg);
+                if actions.is_empty() { break; }
+                use rand::seq::SliceRandom;
+                let action = actions.choose(&mut rand::thread_rng()).unwrap().clone();
+                if let Ok((new_obs, _target)) = env.step(&action) {
+                    let new_ksg = ArcAdapter::grid_to_ksg(&new_obs);
+                    self.program_synthesizer.learn_from_example(&current_ksg, &new_ksg);
+                    current_ksg = new_ksg;
+                }
+            }
+            if self.program_synthesizer.programs.len() > total_success as usize {
+                total_success += 1;
+            }
+        }
+        Ok(total_success as f64 / total_attempts as f64)
+    }
+
+    fn analyze_and_adapt(&mut self, input: &ArcGrid, target: &ArcGrid) {
+        let input_ksg = ArcAdapter::grid_to_ksg(input);
+        let target_ksg = ArcAdapter::grid_to_ksg(target);
+        let subgoals = GoalDecomposer::decompose(&input_ksg, &target_ksg);
+        if !subgoals.is_empty() {
+            for sg in &subgoals {
+                self.program_synthesizer.learn_from_example(&input_ksg, &sg.target_ksg);
+            }
+        }
+        let new_concepts = self.concept_learner.learn_from_diff(&input_ksg, &target_ksg, &mut self.concept_registry);
+        for concept in new_concepts {
+            println!("Discovered new concept: {:?}", concept);
+            self.concept_registry.add_concept(concept.clone());
+            self.program_synthesizer.map_concept_to_transform(concept, "Translate");
+        }
+        let static_concepts = self.discover_concepts(&input_ksg, &target_ksg);
+        for concept in static_concepts {
+            println!("Static concept detected: {:?}", concept);
+        }
+    }
+
+    fn discover_concepts(&self, _input_ksg: &crate::structure::KernelStructureGraph, target_ksg: &crate::structure::KernelStructureGraph) -> Vec<Concept> {
+        let mut new_concepts = Vec::new();
+        for edge in &target_ksg.edges {
+            if edge.rel_type == "contains" && !self.concept_registry.scan(target_ksg).contains(&Concept::Hole) {
+                new_concepts.push(Concept::Hole);
+            }
+        }
+        if target_ksg.nodes.iter().any(|n| n.attributes.contains_key("symmetry")) &&
+           !self.concept_registry.scan(target_ksg).contains(&Concept::Symmetry) {
+            new_concepts.push(Concept::Symmetry);
+        }
+        new_concepts
+    }
+}
+
+
+
+================================================================================
+FÁJL: src/policy/mod.rs
+================================================================================
+
+use crate::executor::Executor;
+use std::collections::HashMap;
+use crate::task::Task;
+use crate::adapter::DomainAdapter;
+use crate::candidate::CandidateGenerator;
+use crate::structure::KernelStructureGraph;
+use crate::structure::topology::{graph_diff, NodeTransformation};
+use crate::telemetry::Telemetry;
+use crate::memory::episodic::EpisodicEntry;
+use crate::memory::semantic::{SemanticSchema, Predicate};
+use crate::memory::procedural::ProceduralRule;
+use crate::memory::loader::load_schemas;
+use crate::executor::LlmExecutor;
+use crate::schema::index::SchemaIndex;
+use crate::abstraction::hypothesis::HypothesisManager;
+use crate::abstraction::program::{Program, ProgramSynthesizer};
+use crate::abstraction::goal_decomposer::GoalDecomposer;
+use crate::adapter::arc::adapter::ArcAdapter;
+use crate::sandbox::operators::Transformation;
+use crate::hypothesis_bus::HypothesisBus;
+use crate::agent::explorer::ExplorerAgent;
+use crate::agent::agent_loop::Environment;
+use crate::concept::ConceptRegistry;
+use std::path::Path;
+
+#[derive(Debug, Clone)]
+pub struct CostModel {
+    pub llm_cost_per_call: f32,
+}
+
+impl CostModel {
+    pub fn estimate_llm_cost(&self, _task: &Task) -> f32 { self.llm_cost_per_call }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct StrategyStats {
+    pub successes: u32,
+    pub failures: u32,
+}
+
+impl StrategyStats {
+    pub fn success_rate(&self) -> f64 {
+        let total = self.successes + self.failures;
+        if total == 0 { 0.5 } else { self.successes as f64 / total as f64 }
+    }
+}
+
+pub struct PolicyEngine<'a> {
+    cost_model: CostModel,
+    candidate_gen: CandidateGenerator,
+    rules: HashMap<u64, ProceduralRule>,
+    episodic_log: Vec<EpisodicEntry>,
+    semantic_schemas: HashMap<uuid::Uuid, SemanticSchema>,
+    schema_index: SchemaIndex,
+    llm_executor: Option<&'a LlmExecutor>,
+    hypothesis_bus: Option<&'a mut HypothesisBus>,
+    pub hypothesis_manager: HypothesisManager,
+    pub program_synthesizer: ProgramSynthesizer,
+    pub explorer: ExplorerAgent,
+    pub concept_registry: ConceptRegistry,
+    pub strategy_stats: HashMap<String, StrategyStats>,
+}
+
+impl<'a> PolicyEngine<'a> {
+    pub fn new(cost_model: CostModel, candidate_gen: CandidateGenerator) -> Self {
+        Self {
+            cost_model, candidate_gen, rules: HashMap::new(), episodic_log: Vec::new(),
+            semantic_schemas: HashMap::new(), schema_index: SchemaIndex::new(), llm_executor: None,
+            hypothesis_bus: None,
+            hypothesis_manager: HypothesisManager::new(),
+            program_synthesizer: ProgramSynthesizer::new(),
+            explorer: ExplorerAgent::new(),
+            concept_registry: ConceptRegistry::default(),
+            strategy_stats: HashMap::new(),
+        }
+    }
+
+    pub fn with_llm_executor(mut self, executor: &'a LlmExecutor) -> Self { self.llm_executor = Some(executor); self }
+    pub fn with_hypothesis_bus(mut self, bus: &'a mut HypothesisBus) -> Self { self.hypothesis_bus = Some(bus); self }
+
+    pub fn load_schemas(&mut self, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+        let schemas = load_schemas(path)?;
+        for (_fp, schema) in schemas { self.schema_index.insert(&schema); self.semantic_schemas.insert(schema.id, schema); }
+        Ok(())
+    }
+
+    fn check_cache(&self, structure: &KernelStructureGraph) -> Option<&ProceduralRule> { self.rules.get(&structure.fingerprint()) }
+    fn store_rule(&mut self, structure: &KernelStructureGraph, solution: &str) {
+        let mut rule = ProceduralRule { id: uuid::Uuid::new_v4(), pattern: solution.to_string(), confidence: 0.5, success_count: 1, domain_tags: vec!["arc".into()] };
+        rule.record_success();
+        self.rules.insert(structure.fingerprint(), rule);
+    }
+    fn record_operator_success(&mut self, action: &str) { let s = self.candidate_gen.operator_stats.entry(action.to_string()).or_insert((0,0)); s.0 += 1; s.1 += 1; }
+    fn record_operator_attempt(&mut self, action: &str) { let s = self.candidate_gen.operator_stats.entry(action.to_string()).or_insert((0,0)); s.1 += 1; }
+    fn record_episodic(&mut self, task: &Task, success: bool, notes: &str) {
+        self.episodic_log.push(EpisodicEntry { id: uuid::Uuid::new_v4(), task_intent: task.intent.clone(), success, timestamp: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs(), notes: notes.to_string() });
+    }
+
+    fn store_semantic_schema(&mut self, structure: &KernelStructureGraph, _solution: &str, _action: &str) {
+        let fp = structure.fingerprint();
+        let mut schema = SemanticSchema::new(structure.clone());
+        schema.metadata.tags = vec!["arc".into()];
+        schema.algebra.requires.insert(Predicate::TypeMismatch);
+        schema.algebra.provides.insert(Predicate::TypeResolved);
+        schema.metadata.fingerprint = fp;
+        self.schema_index.insert(&schema);
+        self.semantic_schemas.insert(schema.id, schema);
+    }
+
+    pub fn learn_transformation(&mut self, before: &KernelStructureGraph, after: &KernelStructureGraph) -> Vec<NodeTransformation> {
+        let diffs = graph_diff(before, after);
+        let fp = before.fingerprint();
+        let mut schema = SemanticSchema::new(before.clone());
+        schema.metadata.tags = vec!["arc".into()];
+        schema.metadata.fingerprint = fp;
+        schema.algebra.requires.insert(Predicate::TypeMismatch);
+        schema.algebra.provides.insert(Predicate::TypeResolved);
+        self.schema_index.insert(&schema);
+        self.semantic_schemas.insert(schema.id, schema);
+        diffs
+    }
+
+    pub fn decide(&self, task: &Task, _adapter: &dyn DomainAdapter) -> &str {
+        let available: Vec<&str> = if task.context.grid.is_some() {
+            vec!["schema_plan", "algorithm", "llm"]
+        } else if task.context.structure.is_some() {
+            let s = task.context.structure.as_ref().unwrap();
+            if s.nodes.is_empty() && s.edges.is_empty() {
+                vec!["success"]
+            } else {
+                let mut opts = vec!["cache", "algorithm", "llm"];
+                if self.check_cache(s).is_some() { opts.insert(0, "cache"); }
+                opts
+            }
+        } else {
+            vec!["llm"]
+        };
+
+        // Ha van statisztika, adaptívan választunk; egyébként alapértelmezett sorrendet
+        if !self.strategy_stats.is_empty() {
+            available.iter()
+                .max_by(|a, b| {
+                    let key_a: &str = *a;
+                    let key_b: &str = *b;
+                    let rate_a = self.strategy_stats.get(key_a).map(|s| s.success_rate()).unwrap_or(0.5);
+                    let rate_b = self.strategy_stats.get(key_b).map(|s| s.success_rate()).unwrap_or(0.5);
+                    rate_a.partial_cmp(&rate_b).unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .unwrap_or(&"llm")
+        } else {
+            // Alapértelmezett preferencia: schema_plan, ha van grid; cache, ha van találat; algorithm; llm
+            if available.contains(&"schema_plan") {
+                &"schema_plan"
+            } else if available.contains(&"cache") {
+                &"cache"
+            } else {
+                available[0]
+            }
+        }
+    }
+
+    pub fn run_local_search(&mut self, structure: &KernelStructureGraph, adapter: &dyn DomainAdapter, original_code: &str, max_candidates: usize) -> Option<String> {
+        let action = structure.nodes.iter().find(|n| n.node_type == "compiler_error").and_then(|n| n.attributes.get("action").cloned()).unwrap_or_default();
+        self.record_operator_attempt(&action);
+        let mut candidates = self.candidate_gen.generate(structure, max_candidates);
+
+        let mut concepts = Vec::new();
+        if let Some(ref mut bus) = self.hypothesis_bus {
+            concepts.extend(bus.get_hypotheses().into_iter().map(|h| h.concept.to_lowercase()));
+        }
+        let reg_concepts: Vec<String> = self.concept_registry.scan(structure).iter().map(|c| format!("{:?}", c).to_lowercase()).collect();
+        concepts.extend(reg_concepts);
+
+        if !concepts.is_empty() {
+            candidates.sort_by_key(|c| {
+                let action = c.nodes.iter()
+                    .find(|n| n.node_type == "compiler_error")
+                    .and_then(|n| n.attributes.get("action").cloned())
+                    .unwrap_or_default();
+                let matches = concepts.iter().any(|concept| action.to_lowercase().contains(concept));
+                if matches { 0 } else { 1 }
+            });
+        }
+
+        for c in &candidates {
+            let code = adapter.graph_to_code(c, original_code);
+            if adapter.validate(structure, &code).is_ok() {
+                self.store_rule(structure, &code);
+                self.store_semantic_schema(structure, &code, &action);
+                self.record_operator_success(&action);
+                return Some(code);
+            }
+        }
+        None
+    }
+
+    fn resolve_abstract_program(program: &Program, target_ksg: &KernelStructureGraph) -> Vec<Transformation> {
+        program.steps.iter().map(|step| {
+            match step {
+                Transformation::RecolorToTarget { node_id } => {
+                    if let Some(target_node) = target_ksg.nodes.iter().find(|n| &n.id == node_id) {
+                        if let Some(color) = target_node.attributes.get("color") {
+                            Transformation::Recolor { node_id: node_id.clone(), new_color: color.clone() }
+                        } else { Transformation::NoOp }
+                    } else { Transformation::NoOp }
+                }
+                Transformation::TranslateToTarget { node_id } => {
+                    if let Some(target_node) = target_ksg.nodes.iter().find(|n| &n.id == node_id) {
+                        let tx = target_node.attributes.get("bbox_x").and_then(|v| v.parse::<i64>().ok()).unwrap_or(0);
+                        let ty = target_node.attributes.get("bbox_y").and_then(|v| v.parse::<i64>().ok()).unwrap_or(0);
+                        Transformation::Translate { node_id: node_id.clone(), dx: tx, dy: ty }
+                    } else { Transformation::NoOp }
+                }
+                _ => step.clone(),
+            }
+        }).collect()
+    }
+
+    fn update_strategy_stats(&mut self, path: &str, success: bool) {
+        let entry = self.strategy_stats.entry(path.to_string()).or_default();
+        if success { entry.successes += 1; } else { entry.failures += 1; }
+    }
+
+    pub fn execute_task(&mut self, task: &mut Task, adapter: &dyn DomainAdapter, telemetry: &mut Telemetry) -> Result<String, String> {
+        let original_code = task.intent.clone();
+
+        if task.context.structure.is_none() {
+            if let Some(ref grid) = task.context.grid {
+                task.context.structure = Some(ArcAdapter::grid_to_ksg(grid));
+            } else {
+                task.context.structure = Some(adapter.build_structure(task));
+            }
+        }
+
+        let path = self.decide(task, adapter).to_string();
+        let mut result = String::new();
+        let mut success = false;
+
+        match path.as_str() {
+            "success" => { result = "already correct".to_string(); success = true; }
+            "cache" => {
+                if let Some(s) = &task.context.structure {
+                    if let Some(r) = self.check_cache(s) { telemetry.record_cache_hit(); result = r.pattern.clone(); success = true; }
+                }
+                if !success {
+                    if let Some(ex) = self.llm_executor {
+                        if let Ok(o) = ex.execute(task) {
+                            telemetry.record_llm_call(o.confidence as u64, 200);
+                            if let Some(s) = &task.context.structure {
+                                if adapter.validate(s, &o.content).is_ok() { self.store_rule(s, &o.content); self.store_semantic_schema(s, &o.content, "llm"); result = o.content; success = true; }
+                            }
+                            if !success { result = "llm response failed validation".to_string(); }
+                        } else { result = "llm executor error".to_string(); }
+                    } else { telemetry.record_llm_call(100, 200); result = "llm fallback (cache miss, no executor)".to_string(); }
+                }
+            }
+            "algorithm" => {
+                let structure = task.context.structure.as_ref().unwrap().clone();
+                if let Some(solution) = self.run_local_search(&structure, adapter, &original_code, 5) {
+                    telemetry.record_local_search_success();
+                    result = solution;
+                    success = true;
+                } else {
+                    if let (Some(ref grid), Some(ref target_grid)) = (&task.context.grid, &task.context.target_grid) {
+                        if let Ok(_plan) = self.explorer.explore_to_target(grid, target_grid, 20) {
+                            result = "interactive exploration solved task".into();
+                            success = true;
+                            telemetry.record_local_search_success();
+                        }
+                    }
+                    if !success {
+                        if let Some(ex) = self.llm_executor {
+                            if let Ok(o) = ex.execute(task) {
+                                telemetry.record_llm_call(o.confidence as u64, 200);
+                                if let Some(s) = &task.context.structure { if adapter.validate(s, &o.content).is_ok() { self.store_rule(s, &o.content); self.store_semantic_schema(s, &o.content, "llm"); result = o.content; success = true; } }
+                                if !success { result = "llm response failed validation".to_string(); }
+                            } else { result = "llm executor error".to_string(); }
+                        } else { telemetry.record_llm_call(100, 200); result = "llm fallback solution".to_string(); }
+                    }
+                }
+            }
+            "schema_plan" => {
+                if let (Some(ref grid), Some(ref target_grid)) = (&task.context.grid, &task.context.target_grid) {
+                    let input_ksg = task.context.structure.as_ref().unwrap().clone();
+                    let target_ksg = ArcAdapter::grid_to_ksg(target_grid);
+
+                    self.hypothesis_manager.process_grid(grid, &mut self.program_synthesizer, Some(&target_ksg));
+
+                    let hypothesis_data = self.hypothesis_manager.best_hypothesis().map(|h| {
+                        (h.representation_name.clone(), h.program.clone())
+                    });
+
+                    if let Some((rep_name, Some(best_program))) = hypothesis_data {
+                        let resolved_steps = Self::resolve_abstract_program(&best_program, &target_ksg);
+                        let resolved_program = Program::new(resolved_steps);
+
+                        let result_graph = resolved_program.apply(&input_ksg);
+                        let result_grid = ArcAdapter::ksg_to_grid(&result_graph, target_grid.width, target_grid.height, 0);
+
+                        if result_grid.pixels == target_grid.pixels {
+                            telemetry.record_local_search_success();
+                            self.store_rule(&input_ksg, &format!("{:?}", best_program.steps));
+                            self.hypothesis_manager.record_success(&rep_name);
+                            result = format!("ARC solved with program: {:?}", best_program.steps);
+                            success = true;
+                        } else {
+                            self.hypothesis_manager.record_failure(&rep_name);
+                        }
+                    }
+
+                    if !success {
+                        let subgoals = GoalDecomposer::decompose(&input_ksg, &target_ksg);
+                        if !subgoals.is_empty() {
+                            println!("Decomposed into {} subgoals", subgoals.len());
+                            let mut current_grid = grid.clone();
+                            let mut all_solved = true;
+
+                            for sg in &subgoals {
+                                let sg_target_grid = ArcAdapter::ksg_to_grid(&sg.target_ksg, target_grid.width, target_grid.height, 0);
+
+                                let current_ksg = ArcAdapter::grid_to_ksg(&current_grid);
+                                let sg_ksg = ArcAdapter::grid_to_ksg(&sg_target_grid);
+                                self.program_synthesizer.learn_from_example(&current_ksg, &sg_ksg);
+
+                                self.hypothesis_manager.process_grid(&current_grid, &mut self.program_synthesizer, Some(&sg_ksg));
+
+                                let sg_hypothesis_data = self.hypothesis_manager.best_hypothesis().map(|h| {
+                                    (h.representation_name.clone(), h.program.clone())
+                                });
+
+                                if let Some((sg_rep_name, Some(sg_program))) = sg_hypothesis_data {
+                                    let resolved = Self::resolve_abstract_program(&sg_program, &sg_ksg);
+                                    let resolved_prog = Program::new(resolved);
+                                    let result_graph = resolved_prog.apply(&current_ksg);
+                                    let result_grid = ArcAdapter::ksg_to_grid(&result_graph, target_grid.width, target_grid.height, 0);
+
+                                    if result_grid.pixels == sg_target_grid.pixels {
+                                        self.hypothesis_manager.record_success(&sg_rep_name);
+                                        current_grid = sg_target_grid;
+                                        println!("Subgoal solved: {}", sg.description);
+                                    } else {
+                                        self.hypothesis_manager.record_failure(&sg_rep_name);
+                                        all_solved = false;
+                                        break;
+                                    }
+                                } else {
+                                    all_solved = false;
+                                    break;
+                                }
+                            }
+
+                            if all_solved {
+                                if current_grid.pixels == target_grid.pixels {
+                                    telemetry.record_local_search_success();
+                                    result = "ARC solved via subgoals".to_string();
+                                    success = true;
+                                }
+                            }
+                        }
+                    }
+
+                    if !success {
+                        if let Ok(_plan) = self.explorer.explore_to_target(grid, target_grid, 20) {
+                            result = "interactive exploration solved task".into();
+                            success = true;
+                            telemetry.record_local_search_success();
+                        }
+                    }
+                }
+
+                if !success {
+                    let structure = task.context.structure.as_ref().unwrap().clone();
+                    if let Some(solution) = self.run_local_search(&structure, adapter, &original_code, 5) {
+                        telemetry.record_local_search_success();
+                        result = solution;
+                        success = true;
+                    } else {
+                        if let Some(ex) = self.llm_executor {
+                            if let Ok(o) = ex.execute(task) {
+                                telemetry.record_llm_call(o.confidence as u64, 200);
+                                if let Some(s) = &task.context.structure { if adapter.validate(s, &o.content).is_ok() { self.store_rule(s, &o.content); self.store_semantic_schema(s, &o.content, "llm"); result = o.content; success = true; } }
+                                if !success { result = "llm response failed validation".to_string(); }
+                            } else { result = "llm executor error".to_string(); }
+                        } else { telemetry.record_llm_call(100, 200); result = "llm fallback solution".to_string(); }
+                    }
+                }
+            }
+            "llm" => {
+                if let Some(ex) = self.llm_executor {
+                    if let Ok(o) = ex.execute(task) {
+                        telemetry.record_llm_call(o.confidence as u64, 200);
+                        if let Some(s) = &task.context.structure { if adapter.validate(s, &o.content).is_ok() { self.store_rule(s, &o.content); self.store_semantic_schema(s, &o.content, "llm"); result = o.content; success = true; } }
+                        if !success { result = "llm response failed validation".to_string(); }
+                    } else { result = "llm executor error".to_string(); }
+                } else { telemetry.record_llm_call(100, 200); result = "llm solution".to_string(); success = true; }
+            }
+            _ => return Err("unknown path".into()),
+        }
+        self.update_strategy_stats(&path, success);
+        self.record_episodic(task, success, &result);
+        if success { Ok(result) } else { Err(result) }
+    }
+
+    pub fn execute_interactive_task(&mut self, env: &mut dyn Environment, telemetry: &mut Telemetry, max_steps: usize) -> Result<String, String> {
+        let obs = env.reset();
+        let mut current_grid = obs.clone();
+        for step in 0..max_steps {
+            let current_ksg = ArcAdapter::grid_to_ksg(&current_grid);
+            let actions = self.explorer.possible_actions(&current_ksg);
+            if actions.is_empty() { break; }
+            use rand::seq::SliceRandom;
+            let action = actions.choose(&mut rand::thread_rng()).unwrap().clone();
+            match env.step(&action) {
+                Ok((new_obs, target_grid)) => {
+                    let new_ksg = ArcAdapter::grid_to_ksg(&new_obs);
+                    self.program_synthesizer.learn_from_example(&current_ksg, &new_ksg);
+                    if new_obs.pixels == target_grid.pixels {
+                        telemetry.record_local_search_success();
+                        return Ok(format!("interactive task solved in {} steps via action {}", step + 1, action));
+                    }
+                    current_grid = new_obs;
+                }
+                Err(_e) => {}
+            }
+        }
+        Err("interactive task not solved within max steps".into())
+    }
+}
+
+#[cfg(test)]
+mod tests;
+
+
+
+================================================================================
+FÁJL: src/adapter/arc/adapter.rs
+================================================================================
+
+use serde::{Serialize, Deserialize};
+use crate::structure::KernelStructureGraph;
+use std::collections::{HashMap, VecDeque};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Serialize, Deserialize)]
+pub struct ArcGrid {
+    pub width: u8,
+    pub height: u8,
+    pub pixels: Vec<u8>,
+}
+
+impl ArcGrid {
+    pub fn new(width: u8, height: u8, pixels: Vec<u8>) -> Self {
+        assert_eq!(pixels.len(), (width as usize) * (height as usize));
+        Self { width, height, pixels }
+    }
+}
+
+pub struct ArcAdapter;
+
+impl ArcAdapter {
+    pub fn grid_to_ksg(grid: &ArcGrid) -> KernelStructureGraph {
+        let mut graph = KernelStructureGraph::new();
+        let mut visited = vec![false; grid.pixels.len()];
+        let width = grid.width as usize;
+
+        for y in 0..grid.height as usize {
+            for x in 0..width {
+                let idx = y * width + x;
+                if visited[idx] || grid.pixels[idx] == 0 {
+                    visited[idx] = true;
+                    continue;
+                }
+
+                let color = grid.pixels[idx];
+                let mut shape_pixels = Vec::new();
+                let mut queue = VecDeque::new();
+                queue.push_back((x, y));
+
+                let (mut min_x, mut max_x) = (x, x);
+                let (mut min_y, mut max_y) = (y, y);
+
+                while let Some((cx, cy)) = queue.pop_front() {
+                    let c_idx = cy * width + cx;
+                    if visited[c_idx] {
+                        continue;
+                    }
+                    visited[c_idx] = true;
+                    shape_pixels.push((cx, cy));
+                    min_x = min_x.min(cx);
+                    max_x = max_x.max(cx);
+                    min_y = min_y.min(cy);
+                    max_y = max_y.max(cy);
+
+                    let neighbors = [
+                        (cx.wrapping_sub(1), cy),
+                        (cx + 1, cy),
+                        (cx, cy.wrapping_sub(1)),
+                        (cx, cy + 1),
+                    ];
+                    for (nx, ny) in neighbors {
+                        if nx < width && ny < grid.height as usize {
+                            let n_idx = ny * width + nx;
+                            if !visited[n_idx] && grid.pixels[n_idx] == color {
+                                queue.push_back((nx, ny));
+                            }
+                        }
+                    }
+                }
+
+                let node_id = format!("obj_{}", graph.nodes.len());
+                let mut attrs = HashMap::new();
+                attrs.insert("color".to_string(), color.to_string());
+                attrs.insert("bbox_x".to_string(), min_x.to_string());
+                attrs.insert("bbox_y".to_string(), min_y.to_string());
+                attrs.insert("bbox_w".to_string(), ((max_x - min_x + 1) as u8).to_string());
+                attrs.insert("bbox_h".to_string(), ((max_y - min_y + 1) as u8).to_string());
+                attrs.insert("area".to_string(), shape_pixels.len().to_string());
+
+                let mut shape_mask = Vec::new();
+                for (px, py) in &shape_pixels {
+                    shape_mask.push(format!("{},{}", px - min_x, py - min_y));
+                }
+                attrs.insert("shape_mask".to_string(), shape_mask.join(";"));
+
+                graph.add_node(&node_id, "arc_object");
+                if let Some(node) = graph.nodes.last_mut() {
+                    node.attributes = attrs;
+                }
+            }
+        }
+
+        let nodes_clone = graph.nodes.clone();
+        for i in 0..nodes_clone.len() {
+            for j in (i + 1)..nodes_clone.len() {
+                let a = &nodes_clone[i];
+                let b = &nodes_clone[j];
+                if let (Some(ax), Some(ay), Some(aw), Some(ah), Some(bx), Some(by), Some(bw), Some(bh)) = (
+                    a.attributes.get("bbox_x").map(|v| v.parse::<u8>().unwrap_or(0)),
+                    a.attributes.get("bbox_y").map(|v| v.parse::<u8>().unwrap_or(0)),
+                    a.attributes.get("bbox_w").map(|v| v.parse::<u8>().unwrap_or(0)),
+                    a.attributes.get("bbox_h").map(|v| v.parse::<u8>().unwrap_or(0)),
+                    b.attributes.get("bbox_x").map(|v| v.parse::<u8>().unwrap_or(0)),
+                    b.attributes.get("bbox_y").map(|v| v.parse::<u8>().unwrap_or(0)),
+                    b.attributes.get("bbox_w").map(|v| v.parse::<u8>().unwrap_or(0)),
+                    b.attributes.get("bbox_h").map(|v| v.parse::<u8>().unwrap_or(0)),
+                ) {
+                    let a_right = ax + aw;
+                    let a_bottom = ay + ah;
+                    let b_right = bx + bw;
+                    let b_bottom = by + bh;
+
+                    if a_right <= bx { graph.add_edge(&a.id, &b.id, "left_of"); }
+                    else if b_right <= ax { graph.add_edge(&a.id, &b.id, "right_of"); }
+                    if a_bottom <= by { graph.add_edge(&a.id, &b.id, "above"); }
+                    else if b_bottom <= ay { graph.add_edge(&a.id, &b.id, "below"); }
+                    if ax >= bx && a_right <= b_right && ay >= by && a_bottom <= b_bottom {
+                        graph.add_edge(&b.id, &a.id, "contains");
+                    } else if bx >= ax && b_right <= a_right && by >= ay && b_bottom <= a_bottom {
+                        graph.add_edge(&a.id, &b.id, "contains");
+                    }
+                    if a_right >= bx && b_right >= ax && a_bottom >= by && b_bottom >= ay {
+                        graph.add_edge(&a.id, &b.id, "touches");
+                    }
+                }
+            }
+        }
+
+        graph
+    }
+
+    pub fn ksg_to_grid(graph: &KernelStructureGraph, width: u8, height: u8, bg_color: u8) -> ArcGrid {
+        let mut pixels = vec![bg_color; (width as usize) * (height as usize)];
+        for node in &graph.nodes {
+            if let (Some(color_str), Some(x_str), Some(y_str), Some(mask_str)) = (
+                node.attributes.get("color"),
+                node.attributes.get("bbox_x"),
+                node.attributes.get("bbox_y"),
+                node.attributes.get("shape_mask"),
+            ) {
+                let color: u8 = color_str.parse().unwrap_or(bg_color);
+                let bx: usize = x_str.parse().unwrap_or(0);
+                let by: usize = y_str.parse().unwrap_or(0);
+                for part in mask_str.split(';') {
+                    let mut coords = part.split(',');
+                    if let (Some(dx_str), Some(dy_str)) = (coords.next(), coords.next()) {
+                        let dx: usize = dx_str.parse().unwrap_or(0);
+                        let dy: usize = dy_str.parse().unwrap_or(0);
+                        let px = bx + dx;
+                        let py = by + dy;
+                        if px < width as usize && py < height as usize {
+                            pixels[py * width as usize + px] = color;
+                        }
+                    }
+                }
+            }
+        }
+        ArcGrid::new(width, height, pixels)
+    }
+}
+
+
+
+================================================================================
+FÁJL: src/hypothesis_bus.rs
+================================================================================
+
+//! Hypothesis bus – Bonsai (LLM) concept proposal channel
+//! The kernel can query concepts and reject/accept them.
+
+use std::collections::VecDeque;
+
+/// A single concept hypothesis from Bonsai.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BonsaiHypothesis {
+    pub concept: String,
+    pub confidence: f64,
+    pub evidence: String,
+}
+
+/// The bus: a queue of hypotheses submitted by Bonsai.
+/// The kernel pulls them via get_hypotheses() and resets.
+#[derive(Debug, Default)]
+pub struct HypothesisBus {
+    hypotheses: VecDeque<BonsaiHypothesis>,
+}
+
+impl HypothesisBus {
+    pub fn new() -> Self {
+        Self {
+            hypotheses: VecDeque::new(),
+        }
+    }
+
+    /// Submit a hypothesis (from Bonsai adapter).
+    pub fn submit(&mut self, hypothesis: BonsaiHypothesis) {
+        self.hypotheses.push_back(hypothesis);
+    }
+
+    /// Get all pending hypotheses and clear the bus.
+    pub fn get_hypotheses(&mut self) -> Vec<BonsaiHypothesis> {
+        self.hypotheses.drain(..).collect()
+    }
+
+    /// Peek without consuming.
+    pub fn peek(&self) -> &VecDeque<BonsaiHypothesis> {
+        &self.hypotheses
+    }
+
+    /// True if empty.
+    pub fn is_empty(&self) -> bool {
+        self.hypotheses.is_empty()
+    }
+}
+
+
+
+================================================================================
+FÁJL: Cargo.toml
+================================================================================
+
+[package]
+name = "manhattan-kernel"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "manhattan-kernel"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+uuid = { version = "1.0", features = ["v4", "serde"] }
+rand = "0.8"
+chrono = { version = "0.4", features = ["serde"] }
+thiserror = "1.0"
+pretty_assertions = "1.4"
+
+[[bin]]
+name = "arc_evaluator"
+path = "src/bin/arc_evaluator.rs"
+
+[[bin]]
+name = "arc_quick_eval"
+path = "src/bin/arc_quick_eval.rs"
+
+
