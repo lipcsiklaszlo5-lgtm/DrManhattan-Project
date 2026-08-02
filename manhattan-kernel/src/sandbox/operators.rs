@@ -12,6 +12,11 @@ pub enum Transformation {
     Split { node_id: String },
     RecolorToTarget { node_id: String },
     TranslateToTarget { node_id: String },
+    // Semantic (node_id-free) variants for SHE
+    SemanticMirrorHorizontal,
+    SemanticMirrorVertical,
+    SemanticTranslateToTarget,
+    SemanticRecolorToTarget,
     MirrorHorizontal { node_id: String },
     MirrorVertical { node_id: String },
     Rotate { node_id: String, angle: u16 },
@@ -174,6 +179,12 @@ pub fn apply_transformation(graph: &KernelStructureGraph, transform: &Transforma
         }
         Transformation::MirrorVertical { .. } => {
             // Handled by GeneralizedProgram::apply_step directly
+        }
+        Transformation::SemanticMirrorHorizontal
+        | Transformation::SemanticMirrorVertical
+        | Transformation::SemanticTranslateToTarget
+        | Transformation::SemanticRecolorToTarget => {
+            // These are handled by GeneralizedProgram::apply_step with selected node IDs
         }
     }
     

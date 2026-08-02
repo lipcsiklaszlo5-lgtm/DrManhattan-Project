@@ -221,6 +221,33 @@ impl GeneralizedProgram {
                 Transformation::MirrorVertical { node_id } => {
                     result = crate::sandbox::operators::apply_mirror_vertical(&result, node_id, gh);
                 }
+                Transformation::SemanticMirrorHorizontal => {
+                    result = crate::sandbox::operators::apply_mirror_horizontal(&result, &node.id, gw);
+                }
+                Transformation::SemanticMirrorVertical => {
+                    result = crate::sandbox::operators::apply_mirror_vertical(&result, &node.id, gh);
+                }
+                Transformation::SemanticTranslateToTarget => {
+                    // Use target_spec to compute translation, then apply Translate with computed dx,dy
+                    if let Some(spec) = &step.target_spec {
+                        if let Some((tx, ty, color_opt)) = Self::resolve_target_spec(spec, graph, gw, gh) {
+                            let ox: i64 = node.attributes.get("bbox_x").and_then(|v| v.parse().ok()).unwrap_or(0);
+                            let oy: i64 = node.attributes.get("bbox_y").and_then(|v| v.parse().ok()).unwrap_or(0);
+                            let dx = tx - ox;
+                            let dy = ty - oy;
+                            let translate = Transformation::Translate { node_id: node.id.clone(), dx, dy };
+                            result = crate::sandbox::operators::apply_transformation(&result, &translate);
+                        }
+                    }
+                }
+                Transformation::SemanticRecolorToTarget => {
+                    if let Some(spec) = &step.target_spec {
+                        if let Some((_, _, Some(color))) = Self::resolve_target_spec(spec, graph, gw, gh) {
+                            let recolor = Transformation::Recolor { node_id: node.id.clone(), new_color: color };
+                            result = crate::sandbox::operators::apply_transformation(&result, &recolor);
+                        }
+                    }
+                }
                 _ => {
                     result = crate::sandbox::operators::apply_transformation(&result, &transformation);
                 }
