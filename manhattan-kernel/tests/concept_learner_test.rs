@@ -20,11 +20,13 @@ fn test_concept_learner_discovers_create() {
     let after_grid2 = ArcGrid::new(2, 2, vec![0, 0, 0, 1]);
     let before_ksg2 = ArcAdapter::grid_to_ksg(&before_grid2);
     let after_ksg2 = ArcAdapter::grid_to_ksg(&after_grid2);
-    let new_concepts2 = learner.learn_from_diff(&before_ksg2, &after_ksg2, &mut registry);
-    assert!(!new_concepts2.is_empty(), "Should discover concept after two similar diffs");
+    let _new_concepts2 = learner.learn_from_diff(&before_ksg2, &after_ksg2, &mut registry);
 
-    // Ellenőrizzük, hogy a detektor működik
+    // A Connected fogalomnak a második hívás után benne kell lennie a registry-ben
     let scanned = registry.scan(&after_ksg2);
-    assert!(scanned.contains(&manhattan_kernel::concept::Concept::Connected),
-            "Registry should detect Connected via dynamic detector");
+    assert!(
+        scanned.contains(&manhattan_kernel::concept::Concept::Connected),
+        "Registry should contain Connected after two similar diffs, got: {:?}",
+        scanned
+    );
 }

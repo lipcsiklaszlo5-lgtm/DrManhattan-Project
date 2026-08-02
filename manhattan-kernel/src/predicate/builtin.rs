@@ -881,3 +881,318 @@ impl Predicate for NeighbourCountPredicate {
     fn name(&self) -> &str { "NeighbourCountPredicate" }
     fn clone_box(&self) -> Box<dyn Predicate> { Box::new(NeighbourCountPredicate { reference: self.reference.clone_box(), min: self.min, max: self.max }) }
 }
+
+// --- Intersects ---
+pub struct IntersectsPredicate { pub reference: Box<dyn Predicate> }
+
+impl Predicate for IntersectsPredicate {
+    fn evaluate(&self, graph: &KernelStructureGraph) -> PredicateResult {
+        let refs = self.reference.evaluate(graph).as_ranked_list();
+        if refs.is_empty() { return PredicateResult::Bool(false); }
+        let ref_ids: Vec<String> = refs.into_iter().map(|(id, _)| id).collect();
+        let ref_rects: Vec<(i64,i64,i64,i64)> = graph.nodes.iter()
+            .filter(|n| ref_ids.contains(&n.id))
+            .filter_map(|n| {
+                let x: i64 = n.attributes.get("bbox_x").and_then(|v| v.parse().ok())?;
+                let y: i64 = n.attributes.get("bbox_y").and_then(|v| v.parse().ok())?;
+                let w: i64 = n.attributes.get("bbox_w").and_then(|v| v.parse().ok()).unwrap_or(1);
+                let h: i64 = n.attributes.get("bbox_h").and_then(|v| v.parse().ok()).unwrap_or(1);
+                Some((x, y, w, h))
+            }).collect();
+        
+        let matching: Vec<(String, f32)> = graph.nodes.iter()
+            .filter(|n| !ref_ids.contains(&n.id))
+            .filter(|n| {
+                if let (Some(x), Some(y), Some(w), Some(h)) = (
+                    n.attributes.get("bbox_x").and_then(|v| v.parse::<i64>().ok()),
+                    n.attributes.get("bbox_y").and_then(|v| v.parse::<i64>().ok()),
+                    n.attributes.get("bbox_w").and_then(|v| v.parse::<i64>().ok()),
+                    n.attributes.get("bbox_h").and_then(|v| v.parse::<i64>().ok()),
+                ) {
+                    ref_rects.iter().any(|(rx, ry, rw, rh)| {
+                        x < *rx + *rw && x + w > *rx && y < *ry + *rh && y + h > *ry
+                    })
+                } else { false }
+            })
+            .map(|n| (n.id.clone(), 1.0))
+            .collect();
+        
+        if matching.is_empty() { PredicateResult::Bool(false) } else { PredicateResult::RankedList(matching) }
+    }
+    fn name(&self) -> &str { "IntersectsPredicate" }
+    fn clone_box(&self) -> Box<dyn Predicate> { Box::new(IntersectsPredicate { reference: self.reference.clone_box() }) }
+}
+
+// --- Concave ---
+pub struct ConcavePredicate;
+impl Predicate for ConcavePredicate {
+    fn evaluate(&self, graph: &KernelStructureGraph) -> PredicateResult {
+        // Ha van Hole, akkor konkáv
+        let hole_result = HolePredicate.evaluate(graph);
+        if let PredicateResult::RankedList(list) = hole_result {
+            if !list.is_empty() {
+                return PredicateResult::RankedList(list);
+            }
+        }
+        // Egyébként ha nem Rectangle, akkor is konkávnak tekintjük
+        let not_rect = NotPredicate { predicate: Box::new(RectanglePredicate) };
+        not_rect.evaluate(graph)
+    }
+    fn name(&self) -> &str { "ConcavePredicate" }
+    fn clone_box(&self) -> Box<dyn Predicate> { Box::new(ConcavePredicate) }
+}
+
+// --- Filled ---
+pub struct FilledPredicate;
+impl Predicate for FilledPredicate {
+    fn evaluate(&self, graph: &KernelStructureGraph) -> PredicateResult {
+        let hole = HolePredicate.evaluate(graph);
+        match hole {
+            PredicateResult::Bool(false) => PredicateResult::Bool(true),
+            PredicateResult::RankedList(list) if list.is_empty() => PredicateResult::Bool(true),
+            _ => PredicateResult::Bool(false),
+        }
+    }
+    fn name(&self) -> &str { "FilledPredicate" }
+    fn clone_box(&self) -> Box<dyn Predicate> { Box::new(FilledPredicate) }
+}
+
+// --- Hollow ---
+pub struct HollowPredicate;
+impl Predicate for HollowPredicate {
+    fn evaluate(&self, graph: &KernelStructureGraph) -> PredicateResult {
+        HolePredicate.evaluate(graph)
+    }
+    fn name(&self) -> &str { "HollowPredicate" }
+    fn clone_box(&self) -> Box<dyn Predicate> { Box::new(HollowPredicate) }
+}
+
+// --- EqualShape ---
+pub struct EqualShapePredicate { pub reference: Box<dyn Predicate> }
+
+impl Predicate for EqualShapePredicate {
+    fn evaluate(&self, graph: &KernelStructureGraph) -> PredicateResult {
+        let refs = self.reference.evaluate(graph).as_ranked_list();
+        if refs.is_empty() { return PredicateResult::Bool(false); }
+        let ref_ids: Vec<String> = refs.into_iter().map(|(id, _)| id).collect();
+        let ref_masks: Vec<String> = graph.nodes.iter()
+            .filter(|n| ref_ids.contains(&n.id))
+            .filter_map(|n| n.attributes.get("shape_mask").cloned())
+            .collect();
+        if ref_masks.is_empty() { return PredicateResult::Bool(false); }
+        let target = &ref_masks[0];
+        let matching: Vec<(String, f32)> = graph.nodes.iter()
+            .filter(|n| !ref_ids.contains(&n.id) && n.attributes.get("shape_mask") == Some(target))
+            .map(|n| (n.id.clone(), 1.0)).collect();
+        if matching.is_empty() { PredicateResult::Bool(false) } else { PredicateResult::RankedList(matching) }
+    }
+    fn name(&self) -> &str { "EqualShapePredicate" }
+    fn clone_box(&self) -> Box<dyn Predicate> { Box::new(EqualShapePredicate { reference: self.reference.clone_box() }) }
+}
+
+// --- BoundingBox ---
+pub struct BoundingBoxPredicate { pub x: Option<i64>, pub y: Option<i64>, pub w: Option<u64>, pub h: Option<u64> }
+impl Predicate for BoundingBoxPredicate {
+    fn evaluate(&self, graph: &KernelStructureGraph) -> PredicateResult {
+        let matching: Vec<(String, f32)> = graph.nodes.iter()
+            .filter(|n| {
+                self.x.map_or(true, |v| n.attributes.get("bbox_x").and_then(|s| s.parse::<i64>().ok()) == Some(v)) &&
+                self.y.map_or(true, |v| n.attributes.get("bbox_y").and_then(|s| s.parse::<i64>().ok()) == Some(v)) &&
+                self.w.map_or(true, |v| n.attributes.get("bbox_w").and_then(|s| s.parse::<u64>().ok()) == Some(v)) &&
+                self.h.map_or(true, |v| n.attributes.get("bbox_h").and_then(|s| s.parse::<u64>().ok()) == Some(v))
+            })
+            .map(|n| (n.id.clone(), 1.0)).collect();
+        if matching.is_empty() { PredicateResult::Bool(false) } else { PredicateResult::RankedList(matching) }
+    }
+    fn name(&self) -> &str { "BoundingBoxPredicate" }
+    fn clone_box(&self) -> Box<dyn Predicate> { Box::new(BoundingBoxPredicate { x: self.x, y: self.y, w: self.w, h: self.h }) }
+}
+
+// --- XOR ---
+pub struct XorPredicate { pub a: Box<dyn Predicate>, pub b: Box<dyn Predicate> }
+impl Predicate for XorPredicate {
+    fn evaluate(&self, graph: &KernelStructureGraph) -> PredicateResult {
+        let ra = self.a.evaluate(graph);
+        let rb = self.b.evaluate(graph);
+        match (ra, rb) {
+            (PredicateResult::Bool(a), PredicateResult::Bool(b)) => PredicateResult::Bool(a ^ b),
+            (PredicateResult::RankedList(list_a), PredicateResult::RankedList(list_b)) => {
+                let ids_a: Vec<String> = list_a.iter().map(|(id, _)| id.clone()).collect();
+                let ids_b: Vec<String> = list_b.iter().map(|(id, _)| id.clone()).collect();
+                let unique: Vec<(String, f32)> = list_a.into_iter()
+                    .filter(|(id, _)| !ids_b.contains(id))
+                    .chain(list_b.into_iter().filter(|(id, _)| !ids_a.contains(id)))
+                    .collect();
+                if unique.is_empty() { PredicateResult::Bool(false) } else { PredicateResult::RankedList(unique) }
+            }
+            (PredicateResult::RankedList(list), PredicateResult::Bool(b)) => {
+                if b { PredicateResult::RankedList(list) } else { PredicateResult::Bool(false) }
+            }
+            (PredicateResult::Bool(a), PredicateResult::RankedList(list)) => {
+                if a { PredicateResult::RankedList(list) } else { PredicateResult::Bool(false) }
+            }
+        }
+    }
+    fn name(&self) -> &str { "XorPredicate" }
+    fn clone_box(&self) -> Box<dyn Predicate> { Box::new(XorPredicate { a: self.a.clone_box(), b: self.b.clone_box() }) }
+}
+
+// --- MirrorSymmetric (biztosra menő újradefiniálás) ---
+pub struct MirrorSymmetricPredicate;
+impl Predicate for MirrorSymmetricPredicate {
+    fn evaluate(&self, graph: &KernelStructureGraph) -> PredicateResult {
+        let objects: Vec<_> = graph.nodes.iter().filter(|n| n.node_type == "arc_object").collect();
+        for i in 0..objects.len() {
+            for j in (i+1)..objects.len() {
+                let a = &objects[i]; let b = &objects[j];
+                if a.attributes.get("shape_mask") == b.attributes.get("shape_mask") &&
+                   a.attributes.get("color") == b.attributes.get("color") {
+                    if let (Some(ax), Some(ay), Some(bx), Some(by)) = (
+                        a.attributes.get("bbox_x").and_then(|v| v.parse::<i64>().ok()),
+                        a.attributes.get("bbox_y").and_then(|v| v.parse::<i64>().ok()),
+                        b.attributes.get("bbox_x").and_then(|v| v.parse::<i64>().ok()),
+                        b.attributes.get("bbox_y").and_then(|v| v.parse::<i64>().ok()),
+                    ) {
+                        if ax == bx || ay == by {
+                            return PredicateResult::RankedList(vec![(a.id.clone(), 1.0), (b.id.clone(), 1.0)]);
+                        }
+                    }
+                }
+            }
+        }
+        PredicateResult::Bool(false)
+    }
+    fn name(&self) -> &str { "MirrorSymmetricPredicate" }
+    fn clone_box(&self) -> Box<dyn Predicate> { Box::new(MirrorSymmetricPredicate) }
+}
+
+// --- RotationalSymmetry ---
+pub struct RotationalSymmetryPredicate;
+impl Predicate for RotationalSymmetryPredicate {
+    fn evaluate(&self, graph: &KernelStructureGraph) -> PredicateResult {
+        let objects: Vec<_> = graph.nodes.iter().filter(|n| n.node_type == "arc_object").collect();
+        for i in 0..objects.len() {
+            for j in (i+1)..objects.len() {
+                let a = &objects[i]; let b = &objects[j];
+                if a.attributes.get("shape_mask") == b.attributes.get("shape_mask") &&
+                   a.attributes.get("color") == b.attributes.get("color") &&
+                   a.attributes.get("area") == b.attributes.get("area") {
+                    return PredicateResult::RankedList(vec![(a.id.clone(), 1.0), (b.id.clone(), 1.0)]);
+                }
+            }
+        }
+        PredicateResult::Bool(false)
+    }
+    fn name(&self) -> &str { "RotationalSymmetryPredicate" }
+    fn clone_box(&self) -> Box<dyn Predicate> { Box::new(RotationalSymmetryPredicate) }
+}
+
+// --- EqualColor ---
+pub struct EqualColorPredicate { pub reference: Box<dyn Predicate> }
+impl Predicate for EqualColorPredicate {
+    fn evaluate(&self, graph: &KernelStructureGraph) -> PredicateResult {
+        let refs = self.reference.evaluate(graph).as_ranked_list();
+        if refs.is_empty() { return PredicateResult::Bool(false); }
+        let ref_ids: Vec<String> = refs.into_iter().map(|(id, _)| id).collect();
+        let ref_colors: Vec<String> = graph.nodes.iter()
+            .filter(|n| ref_ids.contains(&n.id))
+            .filter_map(|n| n.attributes.get("color").cloned())
+            .collect();
+        if ref_colors.is_empty() { return PredicateResult::Bool(false); }
+        let target = &ref_colors[0];
+        let matching: Vec<(String, f32)> = graph.nodes.iter()
+            .filter(|n| !ref_ids.contains(&n.id) && n.attributes.get("color") == Some(target))
+            .map(|n| (n.id.clone(), 1.0)).collect();
+        if matching.is_empty() { PredicateResult::Bool(false) } else { PredicateResult::RankedList(matching) }
+    }
+    fn name(&self) -> &str { "EqualColorPredicate" }
+    fn clone_box(&self) -> Box<dyn Predicate> { Box::new(EqualColorPredicate { reference: self.reference.clone_box() }) }
+}
+
+// --- EqualWidth ---
+pub struct EqualWidthPredicate { pub reference: Box<dyn Predicate> }
+impl Predicate for EqualWidthPredicate {
+    fn evaluate(&self, graph: &KernelStructureGraph) -> PredicateResult {
+        let refs = self.reference.evaluate(graph).as_ranked_list();
+        if refs.is_empty() { return PredicateResult::Bool(false); }
+        let ref_ids: Vec<String> = refs.into_iter().map(|(id, _)| id).collect();
+        let ref_widths: Vec<String> = graph.nodes.iter()
+            .filter(|n| ref_ids.contains(&n.id))
+            .filter_map(|n| n.attributes.get("bbox_w").cloned())
+            .collect();
+        if ref_widths.is_empty() { return PredicateResult::Bool(false); }
+        let target = &ref_widths[0];
+        let matching: Vec<(String, f32)> = graph.nodes.iter()
+            .filter(|n| !ref_ids.contains(&n.id) && n.attributes.get("bbox_w") == Some(target))
+            .map(|n| (n.id.clone(), 1.0)).collect();
+        if matching.is_empty() { PredicateResult::Bool(false) } else { PredicateResult::RankedList(matching) }
+    }
+    fn name(&self) -> &str { "EqualWidthPredicate" }
+    fn clone_box(&self) -> Box<dyn Predicate> { Box::new(EqualWidthPredicate { reference: self.reference.clone_box() }) }
+}
+
+// --- EqualHeight ---
+pub struct EqualHeightPredicate { pub reference: Box<dyn Predicate> }
+impl Predicate for EqualHeightPredicate {
+    fn evaluate(&self, graph: &KernelStructureGraph) -> PredicateResult {
+        let refs = self.reference.evaluate(graph).as_ranked_list();
+        if refs.is_empty() { return PredicateResult::Bool(false); }
+        let ref_ids: Vec<String> = refs.into_iter().map(|(id, _)| id).collect();
+        let ref_heights: Vec<String> = graph.nodes.iter()
+            .filter(|n| ref_ids.contains(&n.id))
+            .filter_map(|n| n.attributes.get("bbox_h").cloned())
+            .collect();
+        if ref_heights.is_empty() { return PredicateResult::Bool(false); }
+        let target = &ref_heights[0];
+        let matching: Vec<(String, f32)> = graph.nodes.iter()
+            .filter(|n| !ref_ids.contains(&n.id) && n.attributes.get("bbox_h") == Some(target))
+            .map(|n| (n.id.clone(), 1.0)).collect();
+        if matching.is_empty() { PredicateResult::Bool(false) } else { PredicateResult::RankedList(matching) }
+    }
+    fn name(&self) -> &str { "EqualHeightPredicate" }
+    fn clone_box(&self) -> Box<dyn Predicate> { Box::new(EqualHeightPredicate { reference: self.reference.clone_box() }) }
+}
+
+// --- EqualNeighbourCount ---
+pub struct EqualNeighbourCountPredicate { pub reference: Box<dyn Predicate> }
+impl Predicate for EqualNeighbourCountPredicate {
+    fn evaluate(&self, graph: &KernelStructureGraph) -> PredicateResult {
+        let refs = self.reference.evaluate(graph).as_ranked_list();
+        if refs.is_empty() { return PredicateResult::Bool(false); }
+        let ref_ids: Vec<String> = refs.into_iter().map(|(id, _)| id).collect();
+        let ref_counts: Vec<usize> = graph.nodes.iter()
+            .filter(|n| ref_ids.contains(&n.id))
+            .map(|n| graph.edges.iter().filter(|e| (e.from == n.id || e.to == n.id) && e.rel_type == "touches").count())
+            .collect();
+        if ref_counts.is_empty() { return PredicateResult::Bool(false); }
+        let target = ref_counts[0];
+        let matching: Vec<(String, f32)> = graph.nodes.iter()
+            .filter(|n| !ref_ids.contains(&n.id))
+            .filter(|n| {
+                let count = graph.edges.iter().filter(|e| (e.from == n.id || e.to == n.id) && e.rel_type == "touches").count();
+                count == target
+            })
+            .map(|n| (n.id.clone(), 1.0)).collect();
+        if matching.is_empty() { PredicateResult::Bool(false) } else { PredicateResult::RankedList(matching) }
+    }
+    fn name(&self) -> &str { "EqualNeighbourCountPredicate" }
+    fn clone_box(&self) -> Box<dyn Predicate> { Box::new(EqualNeighbourCountPredicate { reference: self.reference.clone_box() }) }
+}
+
+// --- IfPredicate (már létezik, de biztosra) ---
+pub struct IfPredicate { pub condition: Box<dyn Predicate>, pub then_branch: Box<dyn Predicate>, pub else_branch: Box<dyn Predicate> }
+impl Predicate for IfPredicate {
+    fn evaluate(&self, graph: &KernelStructureGraph) -> PredicateResult {
+        if self.condition.evaluate(graph).is_true() {
+            self.then_branch.evaluate(graph)
+        } else {
+            self.else_branch.evaluate(graph)
+        }
+    }
+    fn name(&self) -> &str { "IfPredicate" }
+    fn clone_box(&self) -> Box<dyn Predicate> { Box::new(IfPredicate {
+        condition: self.condition.clone_box(),
+        then_branch: self.then_branch.clone_box(),
+        else_branch: self.else_branch.clone_box(),
+    }) }
+}

@@ -19,3 +19,4 @@ pub mod meta_learner;
 pub mod concept_learner;
 pub mod arc_agi3_adapter;
 pub mod predicate;
+pub mod object_selector;

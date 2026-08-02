@@ -48,6 +48,7 @@ impl MetaLearner {
                 self.hypothesis_manager.process_grid(&task.grid, &mut self.program_synthesizer, Some(&target_ksg));
                 let rep_name = self.hypothesis_manager.best_hypothesis().map(|h| h.representation_name.clone());
                 if let Some(name) = rep_name { self.hypothesis_manager.record_success(&name); }
+                // ---- KULCS JAVÍTÁS: fogalomtanulás és adaptáció ----
                 self.analyze_and_adapt(&task.grid, &task.target);
                 let key = "generalized".to_string();
                 let entry = self.task_stats.entry(key).or_insert((0, 0));
@@ -72,7 +73,7 @@ impl MetaLearner {
             }
         }
 
-        // 3. Sikertelen
+        // 3. Sikertelen – adaptáció akkor is
         self.analyze_and_adapt(&task.grid, &task.target);
         let key = "failed".to_string();
         let entry = self.task_stats.entry(key).or_insert((0, 0));

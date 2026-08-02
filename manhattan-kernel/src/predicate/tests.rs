@@ -179,4 +179,98 @@ mod predicate_tests {
             assert_eq!(list[0].0, "a");
         } else { panic!("Expected RankedList"); }
     }
+
+    #[test]
+    fn test_concave_predicate() {
+        let mut g = KernelStructureGraph::new();
+        let a = g.add_node("a", "arc_object");
+        a.attributes.insert("shape_mask".into(), "0,0;1,0;2,0;2,1;2,2;1,2;0,2;0,1".into()); // 3x3 minus center (hole-like)
+        let b = g.add_node("b", "arc_object");
+        b.attributes.insert("shape_mask".into(), "0,0;1,0;0,1;1,1".into()); // 2x2 filled (rectangle)
+        
+        let pred = ConcavePredicate;
+        if let PredicateResult::RankedList(list) = pred.evaluate(&g) {
+            // a is concave (not rectangle), b is rectangle
+            assert!(list.iter().any(|(id, _)| id == "a"), "Concave should detect non-rectangle shapes");
+            assert!(!list.iter().any(|(id, _)| id == "b"), "Concave should not detect rectangle shapes");
+        } else { panic!("Expected RankedList"); }
+    }
+
+    #[test]
+    fn test_filled_predicate() {
+        let mut g = KernelStructureGraph::new();
+        let a = g.add_node("a", "arc_object");
+        a.attributes.insert("shape_mask".into(), "0,0;1,0;0,1;1,1".into());
+        let pred = FilledPredicate;
+        assert_eq!(pred.evaluate(&g), PredicateResult::Bool(true));
+    }
+
+    #[test]
+    fn test_hollow_predicate() {
+        let mut g = KernelStructureGraph::new();
+        let a = g.add_node("a", "arc_object");
+        a.attributes.insert("shape_mask".into(), "0,0;1,0;0,1;1,1".into());
+        let b = g.add_node("b", "arc_object");
+        b.attributes.insert("shape_mask".into(), "0,0".into());
+        g.add_edge("a", "b", "contains");
+        let pred = HollowPredicate;
+        if let PredicateResult::RankedList(list) = pred.evaluate(&g) {
+            assert_eq!(list.len(), 1);
+            assert_eq!(list[0].0, "b");
+        } else { panic!("Expected RankedList"); }
+    }
+
+    #[test]
+    fn test_equal_shape_predicate() {
+        let mut g = KernelStructureGraph::new();
+        let a = g.add_node("a", "arc_object");
+        a.attributes.insert("shape_mask".into(), "0,0;1,0;0,1;1,1".into());
+        a.attributes.insert("color".into(), "1".into());
+        let b = g.add_node("b", "arc_object");
+        b.attributes.insert("shape_mask".into(), "0,0;1,0;0,1;1,1".into());
+        b.attributes.insert("color".into(), "2".into());
+        let c = g.add_node("c", "arc_object");
+        c.attributes.insert("shape_mask".into(), "0,0;1,0".into());
+        let pred = EqualShapePredicate { reference: Box::new(ColorPredicate { color: "1".into() }) };
+        if let PredicateResult::RankedList(list) = pred.evaluate(&g) {
+            assert_eq!(list.len(), 1);
+            assert_eq!(list[0].0, "b");
+        } else { panic!("Expected RankedList"); }
+    }
+
+    #[test]
+    fn test_bounding_box_predicate() {
+        let mut g = KernelStructureGraph::new();
+        let a = g.add_node("a", "arc_object");
+        a.attributes.insert("bbox_x".into(), "5".into());
+        a.attributes.insert("bbox_y".into(), "10".into());
+        a.attributes.insert("bbox_w".into(), "3".into());
+        a.attributes.insert("bbox_h".into(), "4".into());
+        let b = g.add_node("b", "arc_object");
+        b.attributes.insert("bbox_x".into(), "5".into());
+        b.attributes.insert("bbox_y".into(), "10".into());
+        b.attributes.insert("bbox_w".into(), "2".into());
+        b.attributes.insert("bbox_h".into(), "4".into());
+        let pred = BoundingBoxPredicate { x: Some(5), y: Some(10), w: Some(3), h: None };
+        if let PredicateResult::RankedList(list) = pred.evaluate(&g) {
+            assert_eq!(list.len(), 1);
+            assert_eq!(list[0].0, "a");
+        } else { panic!("Expected RankedList"); }
+    }
+
+    #[test]
+    fn test_xor_predicate() {
+        let mut g = KernelStructureGraph::new();
+        let a = g.add_node("a", "arc_object");
+        a.attributes.insert("color".into(), "1".into());
+        let b = g.add_node("b", "arc_object");
+        b.attributes.insert("color".into(), "2".into());
+        let xor = XorPredicate {
+            a: Box::new(ColorPredicate { color: "1".into() }),
+            b: Box::new(ColorPredicate { color: "2".into() }),
+        };
+        if let PredicateResult::RankedList(list) = xor.evaluate(&g) {
+            assert_eq!(list.len(), 2);
+        } else { panic!("Expected RankedList"); }
+    }
 }

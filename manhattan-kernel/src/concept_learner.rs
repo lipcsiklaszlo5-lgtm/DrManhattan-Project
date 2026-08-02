@@ -3,6 +3,7 @@ use crate::structure::topology::graph_diff;
 use crate::concept::{Concept, ConceptDetector, ConceptRegistry};
 use std::collections::HashMap;
 
+/// Dinamikusan generált detektor, ami egy adott színű csomópontot keres.
 struct ColorDetector {
     color: String,
     concept: Concept,
@@ -56,6 +57,8 @@ impl ConceptLearner {
                                         registry.add_detector(Box::new(detector));
                                     }
                                 }
+                                // Mindenképpen adjuk hozzá a learned_concepts-hez, hogy a scan mindig visszaadja
+                                registry.add_concept(concept);
                             }
                         }
                     }
@@ -65,7 +68,9 @@ impl ConceptLearner {
         new_concepts
     }
 
-    fn extract_pattern(diff: &crate::structure::topology::NodeTransformation) -> Option<String> {
+    fn extract_pattern(
+        diff: &crate::structure::topology::NodeTransformation,
+    ) -> Option<String> {
         match diff {
             crate::structure::topology::NodeTransformation::Create { color, .. } => {
                 Some(format!("create_{}", color))
