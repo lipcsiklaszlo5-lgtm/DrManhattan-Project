@@ -644,9 +644,6 @@ mod tests {
 
     #[test]
     fn test_custom_scoring_component_changes_ranking() {
-        // "a" a legnagyobb terulet szerint, de "b" szine "9" -- a sajat
-        // komponens miatt "b"-nek kell nyernie, holott alapertelmezett
-        // profil eseten "a" nyerne (mert nagyobb).
         let g = make_graph(vec![
             ("a", 20, 0, 0, "1"),
             ("b", 5, 1, 1, "9"),
@@ -689,8 +686,6 @@ mod tests {
 
     #[test]
     fn test_default_profile_matches_legacy_score_fn_ranking() {
-        // A default_profile()-nak ugyanazt a sorrendet kell adnia, mint
-        // a regi default_score_fn-nek (visszafele kompatibilitas).
         let g = make_graph(vec![
             ("a", 5, 0, 0, "1"),
             ("b", 8, 1, 1, "1"),
@@ -703,9 +698,5 @@ mod tests {
         let ids_a: Vec<&str> = via_default.selected.iter().map(|s| s.node_id.as_str()).collect();
         let ids_b: Vec<&str> = via_profile.selected.iter().map(|s| s.node_id.as_str()).collect();
         assert_eq!(ids_a, ids_b);
-    }
-        let g = make_graph(vec![("a", 5, 0, 0, "1")]);
-        let result = ObjectSelector::select(&LargestPredicate, &g, &SelectionStrategy::Best, None);
-        assert!(!result.explanation.is_empty());
     }
 }
