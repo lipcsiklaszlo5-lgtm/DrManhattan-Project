@@ -41,7 +41,7 @@ impl MetaLearner {
         let target_ksg = ArcAdapter::grid_to_ksg(&task.target);
 
         // 1. Próbáljunk generalizált programot tanulni
-        if let Some(gen_prog) = self.program_synthesizer.learn_generalized(&input_ksg, &target_ksg) {
+        if let Some(gen_prog) = self.program_synthesizer.learn_generalized(&input_ksg, &target_ksg, task.grid.width, task.grid.height) {
             let result_ksg = gen_prog.apply(&input_ksg, task.target.width, task.target.height);
             let result_grid = ArcAdapter::ksg_to_grid(&result_ksg, task.target.width, task.target.height, 0);
             if result_grid.pixels == task.target.pixels {
@@ -96,7 +96,7 @@ impl MetaLearner {
                 let action = actions.choose(&mut rand::thread_rng()).unwrap().clone();
                 if let Ok((new_obs, _target)) = env.step(&action) {
                     let new_ksg = ArcAdapter::grid_to_ksg(&new_obs);
-                    self.program_synthesizer.learn_generalized(&current_ksg, &new_ksg);
+                    self.program_synthesizer.learn_generalized(&current_ksg, &new_ksg, new_obs.width, new_obs.height);
                     current_ksg = new_ksg;
                 }
             }
@@ -107,24 +107,61 @@ impl MetaLearner {
         Ok(total_success as f64 / total_attempts as f64)
     }
 
+    /// Deterministic prediction for a single input grid.
+    /// Uses the best generalized program learned so far.
+    /// Returns None if no program has been learned yet.
+    pub fn predict(&self, input: &ArcGrid) -> Option<ArcGrid> {
+        let input_ksg = ArcAdapter::grid_to_ksg(input);
+
+        // 1. Try the best hypothesis's program
+        if let Some(best_hypothesis) = self.hypothesis_manager.best_hypothesis() {
+            let prog = self.program_synthesizer.generalized_programs.iter()
+                .find(|p| p.confidence > 0.0);
+            if let Some(gp) = prog {
+                let output_ksg = gp.apply(&input_ksg, input.width, input.height);
+                let output_grid = ArcAdapter::ksg_to_grid(&output_ksg, input.width, input.height, 0);
+                return Some(output_grid);
+            }
+        }
+
+        // 2. Fallback: most confident generalized program
+        let best_prog = self.program_synthesizer.generalized_programs.iter()
+            .max_by(|a, b| a.confidence.partial_cmp(&b.confidence).unwrap_or(std::cmp::Ordering::Equal));
+        if let Some(gp) = best_prog {
+            let output_ksg = gp.apply(&input_ksg, input.width, input.height);
+            let output_grid = ArcAdapter::ksg_to_grid(&output_ksg, input.width, input.height, 0);
+            return Some(output_grid);
+        }
+
+        None
+    }
+
+    /// Consolidate learning using Semantic Hypothesis Engine.
+    /// Call after all training examples for a task have been processed.
+    pub fn finalize(&mut self) {
+        // In future, we'll collect all seen pairs and run SHE.
+        // For now, we'll just trigger a cleanup to remove concrete programs.
+        self.program_synthesizer.consolidate();
+    }
+
     fn analyze_and_adapt(&mut self, input: &ArcGrid, target: &ArcGrid) {
         let input_ksg = ArcAdapter::grid_to_ksg(input);
         let target_ksg = ArcAdapter::grid_to_ksg(target);
         let subgoals = GoalDecomposer::decompose(&input_ksg, &target_ksg);
         if !subgoals.is_empty() {
             for sg in &subgoals {
-                self.program_synthesizer.learn_generalized(&input_ksg, &sg.target_ksg);
+                self.program_synthesizer.learn_generalized(&input_ksg, &sg.target_ksg, input.width, input.height);
             }
         }
         let new_concepts = self.concept_learner.learn_from_diff(&input_ksg, &target_ksg, &mut self.concept_registry);
         for concept in new_concepts {
-            println!("Discovered new concept: {:?}", concept);
+            // concept discovered (logged internally)
             self.concept_registry.add_concept(concept.clone());
             self.program_synthesizer.map_concept_to_transform(concept, "Translate");
         }
         let static_concepts = self.discover_concepts(&input_ksg, &target_ksg);
         for concept in static_concepts {
-            println!("Static concept detected: {:?}", concept);
+            // static concept detected (logged internally)
         }
         if self.program_synthesizer.generalized_programs.len() > 50 {
             self.program_synthesizer.consolidate();

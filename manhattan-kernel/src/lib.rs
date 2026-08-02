@@ -20,3 +20,5 @@ pub mod concept_learner;
 pub mod arc_agi3_adapter;
 pub mod predicate;
 pub mod object_selector;
+pub mod semantic_generalization;
+pub mod semantic_hypothesis;

@@ -4,7 +4,7 @@ use crate::structure::topology::{graph_diff, NodeTransformation};
 use super::transform::{TransformRule, TransformationAlgebra, Condition};
 use crate::concept::{Concept, ConceptRegistry};
 use crate::predicate::{Predicate, PredicateResult};
-use crate::predicate::builtin::{ColorPredicate, LargestPredicate, OnlyObjectPredicate};
+use crate::predicate::builtin::{ColorPredicate, LargestPredicate, OnlyObjectPredicate, AndPredicate};
 
 // --- Program ---
 #[derive(Debug, Clone)]
@@ -213,7 +213,18 @@ impl GeneralizedProgram {
                 }
             }
 
-            result = crate::sandbox::operators::apply_transformation(&result, &transformation);
+            // Handle semantic mirror transformations here because they need grid dimensions
+            match &transformation {
+                Transformation::MirrorHorizontal { node_id } => {
+                    result = crate::sandbox::operators::apply_mirror_horizontal(&result, node_id, gw);
+                }
+                Transformation::MirrorVertical { node_id } => {
+                    result = crate::sandbox::operators::apply_mirror_vertical(&result, node_id, gh);
+                }
+                _ => {
+                    result = crate::sandbox::operators::apply_transformation(&result, &transformation);
+                }
+            }
         }
         result
     }
@@ -286,54 +297,31 @@ impl ProgramSynthesizer {
     }
 
     /// Optimalizált tanulás – a predikátum cache-t használja
-    pub fn learn_generalized(&mut self, before: &KernelStructureGraph, after: &KernelStructureGraph) -> Option<GeneralizedProgram> {
-        let fp = before.fingerprint();
-        let diffs: Vec<_> = graph_diff(before, after).into_iter()
-            .filter(|d| !matches!(d, NodeTransformation::Unchanged { .. })).collect();
-        if diffs.is_empty() { return None; }
-
-        let affected_ids: Vec<String> = diffs.iter().filter_map(Self::get_node_id).collect();
-
-        // Csak akkor építjük újra a predikátum listát, ha a cache-ben még nincs
-        let mut available_predicates: Vec<Box<dyn Predicate>> = Vec::new();
-        let cache_key = (fp, "predicates".to_string());
-        if !self.predicate_cache.contains_key(&cache_key) {
-            for color in 1..=9 {
-                available_predicates.push(Box::new(ColorPredicate { color: color.to_string() }));
-            }
-            available_predicates.push(Box::new(LargestPredicate));
-            available_predicates.push(Box::new(OnlyObjectPredicate));
-            let concept_predicates = self.concept_registry.to_predicates(before);
-            available_predicates.extend(concept_predicates);
-            // Eltároljuk a cache-ben (nem a listát, hanem egy jelzést, hogy már legeneráltuk)
-            self.predicate_cache.insert(cache_key, PredicateResult::Bool(true));
-        } else {
-            // Használjuk a cache-ből a predikátumokat – itt most újraépítjük, de ez gyors
-            for color in 1..=9 {
-                available_predicates.push(Box::new(ColorPredicate { color: color.to_string() }));
-            }
-            available_predicates.push(Box::new(LargestPredicate));
-            available_predicates.push(Box::new(OnlyObjectPredicate));
-            let concept_predicates = self.concept_registry.to_predicates(before);
-            available_predicates.extend(concept_predicates);
+    pub fn learn_generalized(&mut self, before: &KernelStructureGraph, after: &KernelStructureGraph, grid_width: u8, grid_height: u8) -> Option<GeneralizedProgram> {
+        // Use Semantic Hypothesis Engine to generate pure steps
+        let semantic_steps = crate::semantic_hypothesis::generator::generate_candidate_steps(before, after, grid_width, grid_height);
+        if semantic_steps.is_empty() {
+            return None;
         }
 
-        let mut steps = Vec::new();
-        for diff in &diffs {
-            if let Some(transformation) = Self::diff_to_transformation(diff, after) {
-                let condition = Self::find_best_predicate_cached(
-                    &available_predicates, before, &affected_ids, &mut self.predicate_cache,
-                );
-                steps.push(AbstractStep {
-                    condition,
-                    transformation,
-                    target_spec: None,
-                    cardinality: Cardinality::All,
-                });
+        let steps: Vec<AbstractStep> = semantic_steps.into_iter().map(|s| {
+            AbstractStep {
+                condition: s.condition.map(|preds| {
+                    if preds.len() == 1 {
+                        preds[0].clone_box()
+                    } else {
+                        Box::new(AndPredicate { predicates: preds.iter().map(|p| p.clone_box()).collect() })
+                    }
+                }),
+                transformation: s.transformation,
+                target_spec: s.target_spec,
+                cardinality: Cardinality::All, // default, will be refined by later modules
             }
-        }
+        }).collect();
 
-        if steps.is_empty() { return None; }
+        if steps.is_empty() {
+            return None;
+        }
 
         let program = GeneralizedProgram::new(steps, 0.8, 1);
         self.generalized_programs.push(program.clone());
@@ -410,8 +398,9 @@ impl ProgramSynthesizer {
     pub fn consolidate(&mut self) {
         self.programs.retain(|p| p.confidence > 0.4);
         self.generalized_programs.retain(|g| g.confidence > 0.4);
+        // Purge impure programs (those containing concrete node IDs)
+        self.generalized_programs.retain(|g| Self::is_program_pure(g));
         self.concept_registry.consolidate();
-        // Cache tisztítása, hogy ne nőjön a végtelenségig
         if self.predicate_cache.len() > 1000 {
             self.predicate_cache.clear();
         }
@@ -419,6 +408,32 @@ impl ProgramSynthesizer {
             self.programs.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap());
             self.programs.truncate(50);
         }
+    }
+
+    fn is_program_pure(prog: &GeneralizedProgram) -> bool {
+        for step in &prog.steps {
+            if let Some(cond) = &step.condition {
+                let name = cond.name();
+                if name.contains("obj_") || name.contains("bbox_x") || name.contains("bbox_y") {
+                    return false;
+                }
+            }
+            match &step.transformation {
+                Transformation::Translate { node_id, .. } |
+                Transformation::Recolor { node_id, .. } |
+                Transformation::Delete { node_id } |
+                Transformation::Rotate { node_id, .. } => {
+                    if node_id.contains("obj_") {
+                        return false;
+                    }
+                }
+                Transformation::Create { bbox_x: _, bbox_y: _, .. } => {
+                    return false; // absolute coords forbidden
+                }
+                _ => {}
+            }
+        }
+        true
     }
 }
 

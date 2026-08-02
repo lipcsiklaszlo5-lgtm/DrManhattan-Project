@@ -12,6 +12,8 @@ pub enum Transformation {
     Split { node_id: String },
     RecolorToTarget { node_id: String },
     TranslateToTarget { node_id: String },
+    MirrorHorizontal { node_id: String },
+    MirrorVertical { node_id: String },
     Rotate { node_id: String, angle: u16 },
     NoOp,
 }
@@ -167,6 +169,12 @@ pub fn apply_transformation(graph: &KernelStructureGraph, transform: &Transforma
             }
         }
         Transformation::NoOp => {}
+        Transformation::MirrorHorizontal { .. } => {
+            // Handled by GeneralizedProgram::apply_step directly
+        }
+        Transformation::MirrorVertical { .. } => {
+            // Handled by GeneralizedProgram::apply_step directly
+        }
     }
     
     new_graph
@@ -188,4 +196,39 @@ pub fn apply_transformation_to_grid(grid: &ArcGrid, transformation: &Transformat
     let ksg = crate::adapter::arc::adapter::ArcAdapter::grid_to_ksg(grid);
     let new_ksg = apply_transformation(&ksg, transformation);
     Some(crate::adapter::arc::adapter::ArcAdapter::ksg_to_grid(&new_ksg, grid.width, grid.height, 0))
+}
+
+// Additional abstract transformations
+pub fn apply_mirror_horizontal(graph: &KernelStructureGraph, node_id: &str, grid_width: u8) -> KernelStructureGraph {
+    let mut new_graph = graph.clone();
+    if let Some(node) = new_graph.nodes.iter_mut().find(|n| n.id == node_id) {
+        if let Some(x_str) = node.attributes.get("bbox_x").cloned() {
+            if let Ok(x) = x_str.parse::<i64>() {
+                if let Some(w_str) = node.attributes.get("bbox_w").cloned() {
+                    if let Ok(w) = w_str.parse::<i64>() {
+                        let new_x = grid_width as i64 - x - w;
+                        node.attributes.insert("bbox_x".to_string(), new_x.to_string());
+                    }
+                }
+            }
+        }
+    }
+    new_graph
+}
+
+pub fn apply_mirror_vertical(graph: &KernelStructureGraph, node_id: &str, grid_height: u8) -> KernelStructureGraph {
+    let mut new_graph = graph.clone();
+    if let Some(node) = new_graph.nodes.iter_mut().find(|n| n.id == node_id) {
+        if let Some(y_str) = node.attributes.get("bbox_y").cloned() {
+            if let Ok(y) = y_str.parse::<i64>() {
+                if let Some(h_str) = node.attributes.get("bbox_h").cloned() {
+                    if let Ok(h) = h_str.parse::<i64>() {
+                        let new_y = grid_height as i64 - y - h;
+                        node.attributes.insert("bbox_y".to_string(), new_y.to_string());
+                    }
+                }
+            }
+        }
+    }
+    new_graph
 }

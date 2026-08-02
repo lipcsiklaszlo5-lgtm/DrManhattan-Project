@@ -3,7 +3,61 @@ use crate::structure::KernelStructureGraph;
 use std::collections::HashMap;
 use std::cmp::Ordering;
 
-/// Kivalasztasi strategia.
+// =====================================================================
+// TieBreaker trait – independent abstraction for deterministic tie resolution
+// =====================================================================
+pub trait TieBreaker: Send + Sync {
+    fn compare(&self, a: &SelectedObject, b: &SelectedObject) -> Ordering;
+    fn is_semantic_tie(&self, a: &SelectedObject, b: &SelectedObject) -> bool;
+}
+
+fn numeric_suffix(id: &str) -> Option<u64> {
+    let digits: String = id.chars().rev().take_while(|c| c.is_ascii_digit()).collect();
+    if digits.is_empty() { return None; }
+    let digits: String = digits.chars().rev().collect();
+    digits.parse::<u64>().ok()
+}
+
+pub struct DefaultTieBreaker;
+
+impl TieBreaker for DefaultTieBreaker {
+    fn compare(&self, a: &SelectedObject, b: &SelectedObject) -> Ordering {
+        b.score
+            .partial_cmp(&a.score).unwrap_or(Ordering::Equal)
+            .then_with(|| b.predicate_confidence.partial_cmp(&a.predicate_confidence).unwrap_or(Ordering::Equal))
+            .then_with(|| b.specificity.cmp(&a.specificity))
+            .then_with(|| match (numeric_suffix(&a.node_id), numeric_suffix(&b.node_id)) {
+                (Some(x), Some(y)) => x.cmp(&y),
+                _ => a.node_id.cmp(&b.node_id),
+            })
+    }
+
+    fn is_semantic_tie(&self, a: &SelectedObject, b: &SelectedObject) -> bool {
+        a.score == b.score
+            && a.predicate_confidence == b.predicate_confidence
+            && a.specificity == b.specificity
+    }
+}
+
+// =====================================================================
+// RankingEngine trait
+// =====================================================================
+pub trait RankingEngine: Send + Sync {
+    fn rank(&self, candidates: Vec<SelectedObject>, tie_breaker: &dyn TieBreaker) -> Vec<SelectedObject>;
+}
+
+pub struct DefaultRankingEngine;
+
+impl RankingEngine for DefaultRankingEngine {
+    fn rank(&self, mut candidates: Vec<SelectedObject>, tie_breaker: &dyn TieBreaker) -> Vec<SelectedObject> {
+        candidates.sort_by(|a, b| tie_breaker.compare(a, b));
+        candidates
+    }
+}
+
+// =====================================================================
+// Selection strategies
+// =====================================================================
 #[derive(Debug, Clone, PartialEq)]
 pub enum SelectionStrategy {
     Best,
@@ -13,32 +67,26 @@ pub enum SelectionStrategy {
     Unique,
 }
 
-/// Pontozasi fuggveny tipusa. A bemenet a node es a predikatum-konfidencia.
+// =====================================================================
+// Scoring
+// =====================================================================
 pub type ScoreFn = fn(&crate::structure::Node, f32) -> f32;
 
-/// Egy kivalasztott objektum metaadata.
 #[derive(Debug, Clone)]
 pub struct SelectedObject {
     pub node_id: String,
     pub score: f32,
-    /// A predikatum altal az adott jeloltre adott nyers konfidencia (0.0-1.0 tipikusan).
     pub predicate_confidence: f32,
-    /// A predikatum "szemantikai specifikussaga" (lasd Predicate::specificity).
     pub specificity: u32,
     pub reason: String,
 }
 
-/// A kivalasztas eredmenye.
 #[derive(Debug, Clone)]
 pub struct SelectionResult {
-    /// A vegso, strategia szerint megszurt kivalasztott objektumok.
     pub selected: Vec<SelectedObject>,
-    /// A TELJES, szuretlen rangsor (a strategia alkalmazasa elott).
-    /// Kesobbi modulok (pl. Hypothesis Search) ezt hasznaljak majd.
     pub ranking: Vec<SelectedObject>,
     pub ambiguity: bool,
     pub confidence: f32,
-    /// Ember altal olvashato magyarazat a valasztasrol.
     pub explanation: String,
 }
 
@@ -49,49 +97,6 @@ impl SelectionResult {
     pub fn is_unique(&self) -> bool {
         self.selected.len() == 1 && !self.ambiguity
     }
-}
-
-/// Kinyeri egy node_id vegen levo szamot tie-breakhez (pl. "obj_12" -> 12).
-/// Ha nincs szam a vegen, None-t ad vissza, es a hivo fer stringkent
-/// hasonlitja ossze oket.
-fn numeric_suffix(id: &str) -> Option<u64> {
-    let digits: String = id.chars().rev().take_while(|c| c.is_ascii_digit()).collect();
-    if digits.is_empty() {
-        return None;
-    }
-    let digits: String = digits.chars().rev().collect();
-    digits.parse::<u64>().ok()
-}
-
-/// A specifikacio szerinti 4-szintu, determinisztikus tie-break:
-/// 1. magasabb predikatum-konfidencia
-/// 2. nagyobb szemantikai specifikussag
-/// 3. alacsonyabb (numerikus) node id
-/// 4. stabil beszurasi sorrend (ezt a Vec::sort_by stabil rendezese biztositja)
-fn compare_candidates(a: &SelectedObject, b: &SelectedObject) -> Ordering {
-    b.score
-        .partial_cmp(&a.score)
-        .unwrap_or(Ordering::Equal)
-        .then_with(|| {
-            b.predicate_confidence
-                .partial_cmp(&a.predicate_confidence)
-                .unwrap_or(Ordering::Equal)
-        })
-        .then_with(|| b.specificity.cmp(&a.specificity))
-        .then_with(|| match (numeric_suffix(&a.node_id), numeric_suffix(&b.node_id)) {
-            (Some(x), Some(y)) => x.cmp(&y),
-            _ => a.node_id.cmp(&b.node_id),
-        })
-}
-
-/// Ket jelolt akkor szamit "valodi" (szemantikus) holtversenynek, ha az elso
-/// harom szint (score, predikatum-konfidencia, specifikussag) mindegyike
-/// megegyezik -- a negyedik (id/beszurasi sorrend) szint csak a
-/// determinisztikus valasztast donti el, nem oldja fel a ket-ertelmuseget.
-fn is_semantic_tie(a: &SelectedObject, b: &SelectedObject) -> bool {
-    a.score == b.score
-        && a.predicate_confidence == b.predicate_confidence
-        && a.specificity == b.specificity
 }
 
 fn build_explanation(obj: &SelectedObject, ambiguity: bool) -> String {
@@ -111,20 +116,12 @@ fn build_explanation(obj: &SelectedObject, ambiguity: bool) -> String {
 // ---------------------------------------------------------------------
 // Extensible scoring system
 // ---------------------------------------------------------------------
-//
-// A ScoringComponent egy fuggetlen pontozasi szempont (pl. terulet,
-// pozicio, topologia, szimmetria, koncepcio-magabiztossag). Uj szempont
-// hozzaadasahoz NEM kell a meglevo kodot modositani: eleg egy uj
-// struct-ot irni, ami implementalja a ScoringComponent trait-et, es
-// felvenni egy ScoringProfile-ba.
 pub trait ScoringComponent: Send + Sync {
     fn name(&self) -> &str;
-    /// A komponens sulya a vegso, sulyozott osszegben.
     fn weight(&self) -> f32 { 1.0 }
     fn score(&self, node: &crate::structure::Node, predicate_confidence: f32, graph: &KernelStructureGraph) -> f32;
 }
 
-/// A predikatum nyers konfidenciajat viszi at valtozatlanul a pontozasba.
 pub struct PredicateConfidenceComponent { pub weight: f32 }
 impl Default for PredicateConfidenceComponent {
     fn default() -> Self { Self { weight: 1.0 } }
@@ -137,8 +134,6 @@ impl ScoringComponent for PredicateConfidenceComponent {
     }
 }
 
-/// Terulet-alapu pontozas (logaritmikus, hogy a nagyon nagy objektumok
-/// ne nyomjanak el mindent).
 pub struct AreaComponent { pub weight: f32 }
 impl Default for AreaComponent {
     fn default() -> Self { Self { weight: 1.0 } }
@@ -152,8 +147,6 @@ impl ScoringComponent for AreaComponent {
     }
 }
 
-/// Pozicio-alapu pontozas: a racs (feltetelezett) kozeppontjahoz kepesti
-/// kozelseg. A kozelebbi objektumok magasabb pontszamot kapnak.
 pub struct PositionComponent { pub weight: f32, pub grid_width: f32, pub grid_height: f32 }
 impl PositionComponent {
     pub fn new(weight: f32, grid_width: f32, grid_height: f32) -> Self {
@@ -174,8 +167,6 @@ impl ScoringComponent for PositionComponent {
     }
 }
 
-/// Topologia-alapu pontozas: hany elben (kapcsolatban) vesz reszt a node.
-/// Tobb kapcsolat -> magasabb pontszam (kozpontibb objektum).
 pub struct TopologyComponent { pub weight: f32 }
 impl Default for TopologyComponent {
     fn default() -> Self { Self { weight: 1.0 } }
@@ -192,8 +183,6 @@ impl ScoringComponent for TopologyComponent {
     }
 }
 
-/// Szimmetria-alapu pontozas: ha a node-nak van "symmetry" attributuma,
-/// bonuszt kap.
 pub struct SymmetryComponent { pub weight: f32 }
 impl Default for SymmetryComponent {
     fn default() -> Self { Self { weight: 1.0 } }
@@ -206,8 +195,6 @@ impl ScoringComponent for SymmetryComponent {
     }
 }
 
-/// Koncepcio-magabiztossag: ha a node-on van "concept_confidence"
-/// attributum (kesobbi modulok tolthetik fel), azt hasznalja, kulonben 0.
 pub struct ConceptConfidenceComponent { pub weight: f32 }
 impl Default for ConceptConfidenceComponent {
     fn default() -> Self { Self { weight: 1.0 } }
@@ -220,9 +207,6 @@ impl ScoringComponent for ConceptConfidenceComponent {
     }
 }
 
-/// Egy meglevo ScoreFn fuggvenypointert csomagol ScoringComponent-te,
-/// hogy a regi API (score_fn: Option<ScoreFn>) valtozatlanul mukodjon
-/// az uj, bovitheto rendszer felett.
 struct FnComponent(ScoreFn);
 impl ScoringComponent for FnComponent {
     fn name(&self) -> &str { "LegacyScoreFn" }
@@ -231,9 +215,6 @@ impl ScoringComponent for FnComponent {
     }
 }
 
-/// Tobb ScoringComponent sulyozott osszege. Uj szempont hozzaadasa:
-/// implementald a ScoringComponent trait-et, majd told bele egy
-/// ScoringProfile-ba -- a meglevo kodot NEM kell modositani.
 pub struct ScoringProfile {
     pub components: Vec<Box<dyn ScoringComponent>>,
 }
@@ -243,10 +224,10 @@ impl ScoringProfile {
         Self { components }
     }
 
-    /// Az alapertelmezett profil: predikatum-konfidencia + terulet,
-    /// pontosan ugyanaz a kepletet adja, mint a korabbi default_score_fn
-    /// (predicate_score * (1 + log10(area))), hogy a meglevo viselkedes
-    /// es tesztek valtozatlanok maradjanak.
+    pub fn add_component(&mut self, component: Box<dyn ScoringComponent>) {
+        self.components.push(component);
+    }
+
     pub fn default_profile() -> Self {
         Self::new(vec![
             Box::new(PredicateConfidenceComponent::default()),
@@ -258,10 +239,6 @@ impl ScoringProfile {
         if self.components.is_empty() {
             return predicate_confidence;
         }
-        // A default profil eseten pontosan a regi keplet: pred * (1 + area_component)
-        // -- ket komponens (PredicateConfidence, Area) eseten szorzatkent
-        // kombinaljuk a visszafele kompatibilitas erdekeben; tobb/mas
-        // komponens eseten sulyozott osszeget hasznalunk.
         if self.components.len() == 2
             && self.components[0].name() == "PredicateConfidence"
             && self.components[1].name() == "Area"
@@ -276,15 +253,14 @@ impl ScoringProfile {
     }
 }
 
+// =====================================================================
+// ObjectSelector
+// =====================================================================
 pub struct ObjectSelector;
 
 impl ObjectSelector {
     pub fn default_score_fn(node: &crate::structure::Node, predicate_score: f32) -> f32 {
-        let area: f32 = node
-            .attributes
-            .get("area")
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(1.0);
+        let area: f32 = node.attributes.get("area").and_then(|v| v.parse().ok()).unwrap_or(1.0);
         predicate_score * (1.0 + area.log10().max(0.0))
     }
 
@@ -301,26 +277,21 @@ impl ObjectSelector {
         Self::select_with_scoring(predicate, graph, strategy, &profile)
     }
 
-    /// A bovitheto pontozasi utvonal: tetszoleges szamu ScoringComponent
-    /// kombinalhato egy ScoringProfile-ban, uj szempont hozzaadasahoz
-    /// nem kell ezt a fuggvenyt (vagy a select()-et) modositani.
     pub fn select_with_scoring(
         predicate: &dyn Predicate,
         graph: &KernelStructureGraph,
         strategy: &SelectionStrategy,
         profile: &ScoringProfile,
     ) -> SelectionResult {
+        let tie_breaker = DefaultTieBreaker;
+        let ranking_engine = DefaultRankingEngine;
         let pred_specificity = predicate.specificity();
         let pred_name = predicate.name().to_string();
 
-        // 1. Predikatum kiertekelese
+        // 1. Predicate evaluation
         let candidates = match predicate.evaluate(graph) {
             PredicateResult::RankedList(list) => list,
-            PredicateResult::Bool(true) => graph
-                .nodes
-                .iter()
-                .map(|n| (n.id.clone(), 1.0))
-                .collect(),
+            PredicateResult::Bool(true) => graph.nodes.iter().map(|n| (n.id.clone(), 1.0)).collect(),
             PredicateResult::Bool(false) => Vec::new(),
         };
 
@@ -334,14 +305,9 @@ impl ObjectSelector {
             };
         }
 
-        // 2. Pontozas (a ScoringProfile-on keresztul)
-        let node_map: HashMap<&str, &crate::structure::Node> = graph
-            .nodes
-            .iter()
-            .map(|n| (n.id.as_str(), n))
-            .collect();
-
-        let mut scored: Vec<SelectedObject> = candidates
+        // 2. Scoring
+        let node_map: HashMap<&str, &crate::structure::Node> = graph.nodes.iter().map(|n| (n.id.as_str(), n)).collect();
+        let scored: Vec<SelectedObject> = candidates
             .into_iter()
             .filter_map(|(id, pred_score)| {
                 node_map.get(id.as_str()).map(|&node| {
@@ -357,124 +323,85 @@ impl ObjectSelector {
             })
             .collect();
 
-        // 3. Rangsorolas -- stabil rendezes, 4-szintu determinisztikus tie-break
-        scored.sort_by(compare_candidates);
-        let ranking = scored.clone();
+        // 3. Ranking
+        let ranking = ranking_engine.rank(scored, &tie_breaker);
 
-        // 4. Strategia alkalmazasa
+        // 4. Strategy application
+        Self::apply_strategy(strategy, ranking, &tie_breaker)
+    }
+
+    fn apply_strategy(
+        strategy: &SelectionStrategy,
+        ranking: Vec<SelectedObject>,
+        tie_breaker: &DefaultTieBreaker,
+    ) -> SelectionResult {
         match strategy {
-            SelectionStrategy::Best => {
-                if let Some(top) = scored.first().cloned() {
-                    let tie_count = scored
-                        .iter()
-                        .take_while(|s| is_semantic_tie(s, &top))
-                        .count();
-                    let ambiguity = tie_count > 1;
-                    let confidence = top.score;
-                    let explanation = build_explanation(&top, ambiguity);
-                    SelectionResult {
-                        selected: vec![top],
-                        ranking,
-                        ambiguity,
-                        confidence,
-                        explanation,
-                    }
-                } else {
-                    SelectionResult {
-                        selected: Vec::new(),
-                        ranking,
-                        ambiguity: false,
-                        confidence: 0.0,
-                        explanation: "Nem talalhato jelolt objektum.".to_string(),
-                    }
-                }
-            }
-            SelectionStrategy::TopK(k) => {
-                let top: Vec<SelectedObject> = scored.into_iter().take(*k).collect();
-                let confidence = top.first().map(|s| s.score).unwrap_or(0.0);
-                let explanation = format!(
-                    "TopK({}) strategia: {} objektum kivalasztva.",
-                    k,
-                    top.len()
-                );
-                SelectionResult {
-                    selected: top,
-                    ranking,
-                    ambiguity: false,
-                    confidence,
-                    explanation,
-                }
-            }
-            SelectionStrategy::Threshold(t) => {
-                let filtered: Vec<SelectedObject> =
-                    scored.into_iter().filter(|s| s.score >= *t).collect();
-                let confidence = filtered.first().map(|s| s.score).unwrap_or(0.0);
-                let explanation = format!(
-                    "Threshold({:.3}) strategia: {} objektum erte el a kuszoboket.",
-                    t,
-                    filtered.len()
-                );
-                SelectionResult {
-                    selected: filtered,
-                    ranking,
-                    ambiguity: false,
-                    confidence,
-                    explanation,
-                }
-            }
-            SelectionStrategy::All => {
-                let confidence = scored.first().map(|s| s.score).unwrap_or(0.0);
-                let explanation = format!("All strategia: {} objektum kivalasztva.", scored.len());
-                SelectionResult {
-                    selected: scored,
-                    ranking,
-                    ambiguity: false,
-                    confidence,
-                    explanation,
-                }
-            }
-            SelectionStrategy::Unique => {
-                if ranking.len() == 1 {
-                    let obj = ranking[0].clone();
-                    let confidence = obj.score;
-                    let explanation = build_explanation(&obj, false);
-                    SelectionResult {
-                        selected: vec![obj],
-                        ranking,
-                        ambiguity: false,
-                        confidence,
-                        explanation,
-                    }
-                } else {
-                    let top = ranking[0].clone();
-                    let confidence = top.score;
-                    let explanation = format!(
-                        "Ambiguous: {} jelolt felelt meg a feltetelnek (pl. {}). Ok: {}",
-                        ranking.len(),
-                        top.node_id,
-                        top.reason
-                    );
-                    SelectionResult {
-                        selected: vec![top],
-                        ranking,
-                        ambiguity: true,
-                        confidence,
-                        explanation,
-                    }
-                }
-            }
+            SelectionStrategy::Best => Self::apply_best(ranking, tie_breaker),
+            SelectionStrategy::TopK(k) => Self::apply_topk(ranking, *k),
+            SelectionStrategy::Threshold(t) => Self::apply_threshold(ranking, *t),
+            SelectionStrategy::All => Self::apply_all(ranking),
+            SelectionStrategy::Unique => Self::apply_unique(ranking, tie_breaker),
         }
     }
 
-    pub fn select_best_id(
-        predicate: &dyn Predicate,
-        graph: &KernelStructureGraph,
-    ) -> Option<String> {
+    fn apply_best(ranking: Vec<SelectedObject>, tie_breaker: &DefaultTieBreaker) -> SelectionResult {
+        if let Some(top) = ranking.first().cloned() {
+            let tie_count = ranking.iter().take_while(|s| tie_breaker.is_semantic_tie(s, &top)).count();
+            let ambiguity = tie_count > 1;
+            let confidence = top.score;
+            let explanation = build_explanation(&top, ambiguity);
+            SelectionResult { selected: vec![top], ranking, ambiguity, confidence, explanation }
+        } else {
+            SelectionResult { selected: vec![], ranking, ambiguity: false, confidence: 0.0, explanation: "Nem talalhato jelolt objektum.".to_string() }
+        }
+    }
+
+    fn apply_topk(ranking: Vec<SelectedObject>, k: usize) -> SelectionResult {
+        let selected: Vec<_> = ranking.iter().take(k).cloned().collect();
+        let confidence = selected.first().map(|s| s.score).unwrap_or(0.0);
+        let explanation = format!("TopK({}) strategia: {} objektum kivalasztva.", k, selected.len());
+        SelectionResult { selected, ranking, ambiguity: false, confidence, explanation }
+    }
+
+    fn apply_threshold(ranking: Vec<SelectedObject>, t: f32) -> SelectionResult {
+        let selected: Vec<_> = ranking.iter().filter(|s| s.score >= t).cloned().collect();
+        let confidence = selected.first().map(|s| s.score).unwrap_or(0.0);
+        let explanation = format!("Threshold({:.3}) strategia: {} objektum erte el a kuszoboket.", t, selected.len());
+        SelectionResult { selected, ranking, ambiguity: false, confidence, explanation }
+    }
+
+    fn apply_all(ranking: Vec<SelectedObject>) -> SelectionResult {
+        let confidence = ranking.first().map(|s| s.score).unwrap_or(0.0);
+        let explanation = format!("All strategia: {} objektum kivalasztva.", ranking.len());
+        SelectionResult { selected: ranking.clone(), ranking, ambiguity: false, confidence, explanation }
+    }
+
+    fn apply_unique(ranking: Vec<SelectedObject>, _tie_breaker: &DefaultTieBreaker) -> SelectionResult {
+        if ranking.len() == 1 {
+            let obj = ranking[0].clone();
+            let confidence = obj.score;
+            let explanation = build_explanation(&obj, false);
+            SelectionResult { selected: vec![obj], ranking, ambiguity: false, confidence, explanation }
+        } else {
+            let top = ranking[0].clone();
+            let confidence = top.score;
+            let explanation = format!(
+                "Ambiguous: {} jelolt felelt meg a feltetelnek (pl. {}). Ok: {}",
+                ranking.len(), top.node_id, top.reason
+            );
+            SelectionResult { selected: vec![top], ranking, ambiguity: true, confidence, explanation }
+        }
+    }
+
+    pub fn select_best_id(predicate: &dyn Predicate, graph: &KernelStructureGraph) -> Option<String> {
         let result = Self::select(predicate, graph, &SelectionStrategy::Best, None);
         result.best_id().map(|s| s.to_string())
     }
 }
 
+// =====================================================================
+// Tests
+// =====================================================================
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -497,11 +424,7 @@ mod tests {
 
     #[test]
     fn test_best_strategy_selects_largest() {
-        let g = make_graph(vec![
-            ("a", 5, 0, 0, "1"),
-            ("b", 8, 1, 1, "1"),
-            ("c", 3, 2, 2, "2"),
-        ]);
+        let g = make_graph(vec![("a", 5, 0, 0, "1"), ("b", 8, 1, 1, "1"), ("c", 3, 2, 2, "2")]);
         let pred = LargestPredicate;
         let result = ObjectSelector::select(&pred, &g, &SelectionStrategy::Best, None);
         assert_eq!(result.selected.len(), 1);
@@ -511,59 +434,29 @@ mod tests {
 
     #[test]
     fn test_topk_strategy() {
-        let g = make_graph(vec![
-            ("a", 5, 0, 0, "1"),
-            ("b", 8, 1, 1, "1"),
-            ("c", 3, 2, 2, "2"),
-            ("d", 7, 3, 3, "3"),
-        ]);
-        let result = ObjectSelector::select(
-            &ColorPredicate { color: "1".into() },
-            &g,
-            &SelectionStrategy::TopK(2),
-            None,
-        );
+        let g = make_graph(vec![("a", 5, 0, 0, "1"), ("b", 8, 1, 1, "1"), ("c", 3, 2, 2, "2"), ("d", 7, 3, 3, "3")]);
+        let result = ObjectSelector::select(&ColorPredicate { color: "1".into() }, &g, &SelectionStrategy::TopK(2), None);
         assert_eq!(result.selected.len(), 2);
     }
 
     #[test]
     fn test_threshold_strategy() {
-        let g = make_graph(vec![
-            ("a", 5, 0, 0, "1"),
-            ("b", 8, 1, 1, "1"),
-        ]);
-        let result = ObjectSelector::select(
-            &LargestPredicate,
-            &g,
-            &SelectionStrategy::Threshold(0.9),
-            None,
-        );
+        let g = make_graph(vec![("a", 5, 0, 0, "1"), ("b", 8, 1, 1, "1")]);
+        let result = ObjectSelector::select(&LargestPredicate, &g, &SelectionStrategy::Threshold(0.9), None);
         assert!(!result.selected.is_empty());
     }
 
     #[test]
     fn test_unique_strategy_with_ambiguity() {
-        let g = make_graph(vec![
-            ("a", 5, 0, 0, "1"),
-            ("b", 5, 1, 1, "2"),
-        ]);
-        let result = ObjectSelector::select(
-            &LargestPredicate,
-            &g,
-            &SelectionStrategy::Unique,
-            None,
-        );
+        let g = make_graph(vec![("a", 5, 0, 0, "1"), ("b", 5, 1, 1, "2")]);
+        let result = ObjectSelector::select(&LargestPredicate, &g, &SelectionStrategy::Unique, None);
         assert!(result.ambiguity);
         assert_eq!(result.selected.len(), 1);
     }
 
     #[test]
     fn test_determinism() {
-        let g = make_graph(vec![
-            ("a", 5, 0, 0, "1"),
-            ("b", 8, 1, 1, "1"),
-            ("c", 3, 2, 2, "2"),
-        ]);
+        let g = make_graph(vec![("a", 5, 0, 0, "1"), ("b", 8, 1, 1, "1"), ("c", 3, 2, 2, "2")]);
         let first = ObjectSelector::select(&LargestPredicate, &g, &SelectionStrategy::Best, None);
         for _ in 0..100 {
             let next = ObjectSelector::select(&LargestPredicate, &g, &SelectionStrategy::Best, None);
@@ -574,48 +467,23 @@ mod tests {
 
     #[test]
     fn test_select_best_id() {
-        let g = make_graph(vec![
-            ("a", 5, 0, 0, "1"),
-            ("b", 8, 1, 1, "1"),
-        ]);
+        let g = make_graph(vec![("a", 5, 0, 0, "1"), ("b", 8, 1, 1, "1")]);
         let id = ObjectSelector::select_best_id(&LargestPredicate, &g);
         assert_eq!(id, Some("b".to_string()));
     }
 
-    // --- UJ tesztek a tie-break es a ranking/explanation mezokre ---
-
     #[test]
     fn test_ranking_contains_all_candidates_even_when_selected_is_filtered() {
-        let g = make_graph(vec![
-            ("a", 5, 0, 0, "1"),
-            ("b", 8, 1, 1, "1"),
-            ("c", 3, 2, 2, "1"),
-        ]);
-        let result = ObjectSelector::select(
-            &ColorPredicate { color: "1".into() },
-            &g,
-            &SelectionStrategy::Best,
-            None,
-        );
+        let g = make_graph(vec![("a", 5, 0, 0, "1"), ("b", 8, 1, 1, "1"), ("c", 3, 2, 2, "1")]);
+        let result = ObjectSelector::select(&ColorPredicate { color: "1".into() }, &g, &SelectionStrategy::Best, None);
         assert_eq!(result.selected.len(), 1);
         assert_eq!(result.ranking.len(), 3);
     }
 
     #[test]
     fn test_numeric_tie_break_on_equal_score() {
-        // Ket objektum azonos "area"-val -> azonos score, azonos
-        // predikatum-konfidencia, azonos specifikussag -> szemantikus
-        // holtverseny, de a numerikus id dont: obj_2 < obj_10.
-        let g = make_graph(vec![
-            ("obj_10", 5, 0, 0, "1"),
-            ("obj_2", 5, 1, 1, "1"),
-        ]);
-        let result = ObjectSelector::select(
-            &LargestPredicate,
-            &g,
-            &SelectionStrategy::Best,
-            None,
-        );
+        let g = make_graph(vec![("obj_10", 5, 0, 0, "1"), ("obj_2", 5, 1, 1, "1")]);
+        let result = ObjectSelector::select(&LargestPredicate, &g, &SelectionStrategy::Best, None);
         assert_eq!(result.selected[0].node_id, "obj_2");
         assert!(result.ambiguity);
     }
@@ -627,12 +495,6 @@ mod tests {
         assert!(!result.explanation.is_empty());
     }
 
-    // --- Extensible scoring tesztek ---
-
-    /// Sajat, teszt-specifikus scoring komponens: annak a node-nak ad
-    /// hatalmas bonuszt, aminek a color attributuma "9". Ezt a meglevo
-    /// kod (ObjectSelector, ScoringProfile) modositasa NELKUL hoztuk
-    /// letre -- ez bizonyitja a bovithetoseget.
     struct FavorColorNineComponent;
     impl ScoringComponent for FavorColorNineComponent {
         fn name(&self) -> &str { "FavorColorNine" }
@@ -644,31 +506,21 @@ mod tests {
 
     #[test]
     fn test_custom_scoring_component_changes_ranking() {
-        let g = make_graph(vec![
-            ("a", 20, 0, 0, "1"),
-            ("b", 5, 1, 1, "9"),
-        ]);
-
+        let g = make_graph(vec![("a", 20, 0, 0, "1"), ("b", 5, 1, 1, "9")]);
         let default_result = ObjectSelector::select(&AreaPredicate { min: None, max: None }, &g, &SelectionStrategy::Best, None);
         assert_eq!(default_result.selected[0].node_id, "a");
-
         let custom_profile = ScoringProfile::new(vec![
             Box::new(PredicateConfidenceComponent::default()),
             Box::new(AreaComponent { weight: 0.01 }),
             Box::new(FavorColorNineComponent),
         ]);
-        let custom_result = ObjectSelector::select_with_scoring(
-            &AreaPredicate { min: None, max: None }, &g, &SelectionStrategy::Best, &custom_profile,
-        );
+        let custom_result = ObjectSelector::select_with_scoring(&AreaPredicate { min: None, max: None }, &g, &SelectionStrategy::Best, &custom_profile);
         assert_eq!(custom_result.selected[0].node_id, "b");
     }
 
     #[test]
     fn test_scoring_profile_determinism() {
-        let g = make_graph(vec![
-            ("a", 5, 0, 0, "1"),
-            ("b", 8, 1, 1, "1"),
-        ]);
+        let g = make_graph(vec![("a", 5, 0, 0, "1"), ("b", 8, 1, 1, "1")]);
         let profile = ScoringProfile::new(vec![
             Box::new(PredicateConfidenceComponent::default()),
             Box::new(AreaComponent::default()),
@@ -686,11 +538,7 @@ mod tests {
 
     #[test]
     fn test_default_profile_matches_legacy_score_fn_ranking() {
-        let g = make_graph(vec![
-            ("a", 5, 0, 0, "1"),
-            ("b", 8, 1, 1, "1"),
-            ("c", 3, 2, 2, "1"),
-        ]);
+        let g = make_graph(vec![("a", 5, 0, 0, "1"), ("b", 8, 1, 1, "1"), ("c", 3, 2, 2, "1")]);
         let via_default = ObjectSelector::select(&ColorPredicate { color: "1".into() }, &g, &SelectionStrategy::TopK(3), None);
         let via_profile = ObjectSelector::select_with_scoring(
             &ColorPredicate { color: "1".into() }, &g, &SelectionStrategy::TopK(3), &ScoringProfile::default_profile(),
@@ -698,5 +546,14 @@ mod tests {
         let ids_a: Vec<&str> = via_default.selected.iter().map(|s| s.node_id.as_str()).collect();
         let ids_b: Vec<&str> = via_profile.selected.iter().map(|s| s.node_id.as_str()).collect();
         assert_eq!(ids_a, ids_b);
+    }
+
+    #[test]
+    fn test_add_component_method() {
+        let mut profile = ScoringProfile::default_profile();
+        let initial_count = profile.components.len();
+        profile.add_component(Box::new(TopologyComponent::default()));
+        assert_eq!(profile.components.len(), initial_count + 1);
+        assert_eq!(profile.components.last().unwrap().name(), "Topology");
     }
 }
