@@ -27,3 +27,8 @@ path = "src/bin/arc_fast_eval.rs"
 [[bin]]
 name = "arc_accurate_eval"
 path = "src/bin/arc_accurate_eval.rs"
+
+
+[[bin]]
+name = "arc_abstraction_coverage"
+path = "src/bin/arc_abstraction_coverage.rs"

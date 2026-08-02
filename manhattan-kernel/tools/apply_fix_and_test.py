@@ -1,10 +1,40 @@
+import subprocess, sys, os, textwrap, pathlib
+
+ROOT = pathlib.Path("/workspaces/DrManhattan-Project/manhattan-kernel")
+
+def run(cmd, **kwargs):
+    print(f"\n>>> {cmd}", flush=True)
+    p = subprocess.run(cmd, shell=True, cwd=str(ROOT), capture_output=True, text=True, **kwargs)
+    print(p.stdout)
+    if p.stderr:
+        print(p.stderr, file=sys.stderr)
+    return p
+
+# ===== 1. IGAZOLÁSOK =====
+print("=" * 60)
+print("1. LÉPÉSPÁROSÍTÁS – tartalom alapú, nem index alapú")
+print("=" * 60)
+print("A generate_common_steps a transzformáció típusát és a predikátumnevek halmazát hasonlítja össze.")
+
+print("\n2. DETERMINIZMUS – HashMap ellenőrzés")
+run("grep -rn 'HashMap' src/semantic_hypothesis/")
+
+print("\n3. TRANSFORMATION ENUM – igazolás")
+run("grep -n 'enum Transformation' -A 25 src/sandbox/operators.rs")
+
+print("\n4. DUPLIKÁTUM-ELLENŐRZÉS")
+run("grep -rn 'generate_common_steps\\|fn generate_candidate' src/")
+
+# ===== 2. JAVÍTÁSOK =====
+# 2.1. generator.rs – cseréljük a korábban hozzáfűzött hibás függvényt egy helyes implementációra
+generator_path = ROOT / "src" / "semantic_hypothesis" / "generator.rs"
+
+new_generator = textwrap.dedent("""\
 use crate::structure::KernelStructureGraph;
 use crate::structure::topology::{graph_diff, NodeTransformation};
 use crate::sandbox::operators::Transformation;
 use super::semantic_descriptor::describe_node_all;
 use super::hypothesis::{SemanticStep};
-use crate::object_selector::ObjectSelector;
-use crate::predicate::Predicate;
 
 pub fn generate_candidate_steps(
     input: &KernelStructureGraph,
@@ -165,3 +195,76 @@ pub fn generate_common_steps(
 
     common_steps
 }
+""")
+
+generator_path.write_text(new_generator)
+
+# 2.2. meta_learner.rs – a finalize cseréje
+meta_path = ROOT / "src" / "meta_learner.rs"
+meta_content = meta_path.read_text()
+
+old_block = """        // Generate candidate steps from each pair
+        let mut all_step_sets: Vec<Vec<crate::semantic_hypothesis::hypothesis::SemanticStep>> = Vec::new();
+        for (input_ksg, output_ksg, gw, gh) in &ksg_pairs {
+            let steps = crate::semantic_hypothesis::generator::generate_candidate_steps(input_ksg, output_ksg, *gw, *gh);
+            all_step_sets.push(steps);
+        }
+
+        // Find steps that reproduce the output for every pair
+        let mut validated_steps: Vec<crate::semantic_hypothesis::hypothesis::SemanticStep> = Vec::new();
+        if let Some(first_steps) = all_step_sets.first() {
+            for step in first_steps {
+                let mut works_for_all = true;
+                for (idx, (input_ksg, output_ksg, gw, gh)) in ksg_pairs.iter().enumerate() {
+                    if !crate::semantic_hypothesis::evaluator::step_reproduces_output(
+                        step, input_ksg, output_ksg, *gw, *gh,
+                    ) {
+                        works_for_all = false;
+                        break;
+                    }
+                }
+                if works_for_all {
+                    validated_steps.push(step.clone());
+                }
+            }
+        }"""
+
+new_block = """        // Új: közös lépések generálása az összes train párból
+        let common_steps = crate::semantic_hypothesis::generator::generate_common_steps(&ksg_pairs);
+
+        // Find steps that reproduce the output for every pair (megtartva a végső validációt)
+        let mut validated_steps: Vec<crate::semantic_hypothesis::hypothesis::SemanticStep> = Vec::new();
+        for step in &common_steps {
+            let mut works_for_all = true;
+            for (input_ksg, output_ksg, gw, gh) in &ksg_pairs {
+                if !crate::semantic_hypothesis::evaluator::step_reproduces_output(
+                    step, input_ksg, output_ksg, *gw, *gh,
+                ) {
+                    works_for_all = false;
+                    break;
+                }
+            }
+            if works_for_all {
+                validated_steps.push(step.clone());
+            }
+        }"""
+
+if old_block in meta_content:
+    meta_content = meta_content.replace(old_block, new_block)
+    meta_path.write_text(meta_content)
+else:
+    print("Hiba: Nem található a régi finalize blokk.", file=sys.stderr)
+    sys.exit(1)
+
+# ===== 3. FORDÍTÁS ÉS TESZT =====
+print("\n===== BUILD =====")
+run("cargo build --release --bin arc_abstraction_coverage 2>&1")
+
+print("\n===== COVERAGE TESZT =====")
+tasks = sorted((ROOT / "ARC-AGI-master" / "data" / "training").glob("*.json"))
+if not tasks:
+    tasks = sorted((ROOT / "ARC-AGI-master" / "data" / "evaluation").glob("*.json"))
+for t in tasks[:5]:
+    print(f"\n--- {t.name} ---")
+    cmd = f"target/release/arc_abstraction_coverage {t} 2>&1 | python3 -c 'import sys,json; r=json.load(sys.stdin); print(f\"Best coverage: {r[chr(34) + chr(34)]}%\")'"
+    run(cmd)

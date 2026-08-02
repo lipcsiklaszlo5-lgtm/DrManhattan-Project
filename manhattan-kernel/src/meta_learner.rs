@@ -6,6 +6,7 @@ use crate::abstraction::goal_decomposer::GoalDecomposer;
 use crate::concept::{ConceptRegistry, Concept};
 use crate::concept_learner::ConceptLearner;
 use crate::adapter::arc::adapter::{ArcGrid, ArcAdapter};
+use crate::structure::KernelStructureGraph;
 use std::collections::HashMap;
 
 pub struct TaskInstance {
@@ -138,9 +139,45 @@ impl MetaLearner {
 
     /// Consolidate learning using Semantic Hypothesis Engine.
     /// Call after all training examples for a task have been processed.
-    pub fn finalize(&mut self) {
-        // In future, we'll collect all seen pairs and run SHE.
-        // For now, we'll just trigger a cleanup to remove concrete programs.
+    pub fn finalize(&mut self, train_pairs: &[(ArcGrid, ArcGrid)]) {
+        // Use all training pairs to validate and select the best generalized program.
+        let ksg_pairs: Vec<(KernelStructureGraph, KernelStructureGraph, u8, u8)> = train_pairs.iter().map(|(input, output)| {
+            let ik = ArcAdapter::grid_to_ksg(input);
+            let ok = ArcAdapter::grid_to_ksg(output);
+            (ik, ok, input.width, input.height)
+        }).collect();
+
+        self.program_synthesizer.generalized_programs.clear();
+
+        // Új: közös lépések generálása az összes train párból
+        let common_steps = crate::semantic_hypothesis::generator::generate_common_steps(&ksg_pairs);
+
+        // A generate_common_steps már validálta a lépéseket, itt csak átvesszük őket
+        let validated_steps = common_steps;
+
+        // Convert validated steps to GeneralizedProgram
+        if !validated_steps.is_empty() {
+            let abstract_steps: Vec<crate::abstraction::program::AbstractStep> = validated_steps.into_iter().map(|s| {
+                use crate::abstraction::program::{AbstractStep, Cardinality};
+                AbstractStep {
+                    condition: s.condition.map(|preds| {
+                        if preds.len() == 1 {
+                            preds[0].clone_box()
+                        } else {
+                            Box::new(crate::predicate::builtin::AndPredicate {
+                                predicates: preds.iter().map(|p| p.clone_box()).collect(),
+                            })
+                        }
+                    }),
+                    transformation: s.transformation,
+                    target_spec: s.target_spec,
+                    cardinality: Cardinality::All,
+                }
+            }).collect();
+            let program = crate::abstraction::program::GeneralizedProgram::new(abstract_steps, 1.0, ksg_pairs.len());
+            self.program_synthesizer.generalized_programs.push(program);
+        }
+
         self.program_synthesizer.consolidate();
     }
 

@@ -54,7 +54,7 @@ fn main() {
                             let input_ksg = ArcAdapter::grid_to_ksg(&input_grid);
                             let target_ksg = ArcAdapter::grid_to_ksg(&output_grid);
                             // Közvetlenül a learn_generalized-et hívjuk, nem a learn_from_task-et
-                            learner.program_synthesizer.learn_generalized(&input_ksg, &target_ksg);
+                            learner.program_synthesizer.learn_generalized(&input_ksg, &target_ksg, input_grid.width, input_grid.height);
                         }
 
                         // Értékelés a test páron

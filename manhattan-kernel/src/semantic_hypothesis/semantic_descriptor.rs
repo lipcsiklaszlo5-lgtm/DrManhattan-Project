@@ -88,6 +88,95 @@ pub fn describe_node_uniquely(
     None
 }
 
+/// Generate ALL semantic descriptions (predicate conjunctions) that uniquely
+/// identify the given node in the graph -- not just the first/best one.
+/// Each element of the returned Vec is one alternative AND-combination of
+/// predicates that, together, select exactly this node. This gives the
+/// generator multiple candidates to try across train pairs, increasing the
+/// chance that at least one description generalizes to all of them.
+pub fn describe_node_all(
+    node_id: &str,
+    graph: &KernelStructureGraph,
+) -> Vec<Vec<Box<dyn Predicate>>> {
+    let target_node = match graph.nodes.iter().find(|n| n.id == node_id) {
+        Some(n) => n,
+        None => return Vec::new(),
+    };
+
+    let mut results: Vec<Vec<Box<dyn Predicate>>> = Vec::new();
+
+    let builtins: Vec<Box<dyn Predicate>> = vec![
+        Box::new(builtin::LargestPredicate),
+        Box::new(builtin::SmallestPredicate),
+        Box::new(builtin::LeftmostPredicate),
+        Box::new(builtin::RightmostPredicate),
+        Box::new(builtin::TopmostPredicate),
+        Box::new(builtin::BottommostPredicate),
+        Box::new(builtin::OnlyObjectPredicate),
+        Box::new(builtin::UniqueColorPredicate),
+        Box::new(builtin::MajorityColorPredicate),
+        Box::new(builtin::MinorityColorPredicate),
+    ];
+
+    let mut unique_singles: Vec<Box<dyn Predicate>> = Vec::new();
+
+    for pred in builtins {
+        if let PredicateResult::RankedList(ids) = pred.evaluate(graph) {
+            if ids.len() == 1 && ids[0].0 == node_id {
+                unique_singles.push(pred);
+            }
+        }
+    }
+
+    for c in 1..=9 {
+        let color_pred = builtin::ColorPredicate { color: c.to_string() };
+        if let PredicateResult::RankedList(ids) = color_pred.evaluate(graph) {
+            if ids.len() == 1 && ids[0].0 == node_id {
+                unique_singles.push(Box::new(color_pred));
+            }
+        }
+    }
+
+    // Minden onmagaban egyedien azonosito predikatum kulon jelolt.
+    for pred in &unique_singles {
+        results.push(vec![pred.clone_box()]);
+    }
+
+    // Parok kombinacioja is jelolt (akkor is, ha egyenkent mar egyedik --
+    // igy tobb, egymastol fuggetlen leiras all rendelkezesre a generalizacioz).
+    for i in 0..unique_singles.len() {
+        for j in (i + 1)..unique_singles.len() {
+            let combined = builtin::AndPredicate {
+                predicates: vec![unique_singles[i].clone_box(), unique_singles[j].clone_box()],
+            };
+            if let PredicateResult::RankedList(ids) = combined.evaluate(graph) {
+                if ids.len() == 1 && ids[0].0 == node_id {
+                    results.push(vec![Box::new(combined)]);
+                }
+            }
+        }
+    }
+
+    // Fallback: ha semmi nem egyedi onmagaban, probaljuk a szin + legnagyobb
+    // kombinaciot, mint az eredeti describe_node_uniquely fallback aga.
+    if results.is_empty() {
+        if let Some(color) = target_node.attributes.get("color").cloned() {
+            let cp = builtin::ColorPredicate { color };
+            let lp = builtin::LargestPredicate;
+            let combined = builtin::AndPredicate {
+                predicates: vec![Box::new(cp), Box::new(lp)],
+            };
+            if let PredicateResult::RankedList(ids) = combined.evaluate(graph) {
+                if ids.len() == 1 && ids[0].0 == node_id {
+                    results.push(vec![Box::new(combined)]);
+                }
+            }
+        }
+    }
+
+    results
+}
+
 /// Canonicalize a list of predicates (order, normalization) not yet implemented fully.
 pub fn canonicalize(predicates: Vec<Box<dyn Predicate>>) -> Vec<Box<dyn Predicate>> {
     // Sort by name for now

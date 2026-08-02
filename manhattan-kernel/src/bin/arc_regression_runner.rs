@@ -140,7 +140,9 @@ fn main() {
 
         let mut learner = MetaLearner::new();
 
-        // Train on all training examples
+        // Train on all training examples -- kozben osszegyujtjuk a train
+        // par grid-eket a finalize() szamara is.
+        let mut train_pairs: Vec<(ArcGrid, ArcGrid)> = Vec::new();
         if let Some(train_examples) = task["train"].as_array() {
             for example in train_examples {
                 let input = match grid_from_json(&example["input"]) {
@@ -151,6 +153,7 @@ fn main() {
                     Ok(g) => g,
                     Err(_) => continue,
                 };
+                train_pairs.push((input.clone(), output.clone()));
                 let instance = TaskInstance { grid: input.clone(), target: output.clone() };
                 learner.learn_from_task(instance);
 
@@ -164,7 +167,7 @@ fn main() {
             }
         }
 
-        learner.finalize();
+        learner.finalize(&train_pairs);
 
         // Test examples
         if let Some(test_examples) = task["test"].as_array() {

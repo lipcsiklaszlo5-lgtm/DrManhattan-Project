@@ -66,13 +66,17 @@ fn main() {
     let train_examples = task["train"].as_array().unwrap();
     let total_pairs = train_examples.len();
 
-    // Tanítás
+    // Tanítás -- kozben osszegyujtjuk a train par grid-eket a finalize()
+    // szamara is (klonozva, mert az eredeti input/output a TaskInstance-be
+    // mozog).
+    let mut train_pairs: Vec<(ArcGrid, ArcGrid)> = Vec::with_capacity(total_pairs);
     for example in train_examples {
         let input = grid_from_json(&example["input"]).unwrap();
         let output = grid_from_json(&example["output"]).unwrap();
+        train_pairs.push((input.clone(), output.clone()));
         learner.learn_from_task(TaskInstance { grid: input, target: output });
     }
-    learner.finalize();
+    learner.finalize(&train_pairs);
 
     // Értékelés: minden generalizált programot tesztelünk az összes train páron
     let programs = &learner.program_synthesizer.generalized_programs;
