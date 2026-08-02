@@ -180,9 +180,9 @@ impl GeneralizedProgram {
     }
 
     fn apply_step(graph: &KernelStructureGraph, step: &AbstractStep, gw: u8, gh: u8) -> KernelStructureGraph {
-        let candidates: Vec<crate::structure::Node> = match Self::select_candidates(graph, step) {
-            Some(nodes) => nodes.into_iter().cloned().collect(),
-            None => Vec::new(), // Cardinality::ExactlyOne, de ambiguity/0 talalat -> nincs vegrehajtas
+        let candidates: Vec<crate::structure::Node> = match &step.condition {
+            Some(pred) => Self::matching_nodes(graph, pred.as_ref()).into_iter().cloned().collect(),
+            None => graph.nodes.clone(),
         };
 
         let mut result = graph.clone();

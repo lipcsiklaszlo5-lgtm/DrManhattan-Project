@@ -82,62 +82,13 @@ impl GeneralizedProgram {
         Self { steps, confidence, num_train_pairs }
     }
 
-    /// Kompatibilitasi adapter: a regi "matching_nodes -> foreach" hivasi
-    /// mintat tartja eletben, de belulről mar az ObjectSelector::select-et
-    /// hasznalja SelectionStrategy::All strategiaval, hogy egyetlen kozos
-    /// utvonalon menjen at minden jelolt-kivalasztas.
     pub fn matching_nodes<'a>(graph: &'a KernelStructureGraph, predicate: &dyn Predicate) -> Vec<&'a crate::structure::Node> {
-        let result = crate::object_selector::ObjectSelector::select(
-            predicate,
-            graph,
-            &crate::object_selector::SelectionStrategy::All,
-            None,
-        );
-        result.selected.iter()
-            .filter_map(|sel| graph.nodes.iter().find(|n| n.id == sel.node_id))
-            .collect()
-    }
-
-    /// Cardinality -> SelectionStrategy forditas.
-    fn strategy_for_cardinality(cardinality: &Cardinality) -> crate::object_selector::SelectionStrategy {
-        match cardinality {
-            Cardinality::All => crate::object_selector::SelectionStrategy::All,
-            Cardinality::ExactlyOne => crate::object_selector::SelectionStrategy::Unique,
-            Cardinality::AtMostOne => crate::object_selector::SelectionStrategy::Best,
-        }
-    }
-
-    /// Jeloltek beszerzese az ObjectSelector-on keresztul, a lepes
-    /// Cardinality mezoje altal meghatarozott strategiaval. Ha nincs
-    /// condition, minden node jelolt marad (visszafele kompatibilis a
-    /// korabbi "None -> osszes node" viselkedessel).
-    fn select_candidates<'a>(
-        graph: &'a KernelStructureGraph,
-        step: &AbstractStep,
-    ) -> Option<Vec<&'a crate::structure::Node>> {
-        match &step.condition {
-            None => Some(graph.nodes.iter().collect()),
-            Some(pred) => {
-                let strategy = Self::strategy_for_cardinality(&step.cardinality);
-                let result = crate::object_selector::ObjectSelector::select(
-                    pred.as_ref(), graph, &strategy, None,
-                );
-
-                // Cardinality::ExactlyOne eseten, ha a valasztas ketertelmu
-                // vagy nincs talalat, NEM talalgatunk -- a lepes ezen a
-                // bemeneten nem hajt vegre semmit, inkabb mint hogy hibas
-                // node-ot valasszon.
-                if matches!(step.cardinality, Cardinality::ExactlyOne) {
-                    if result.ambiguity || result.selected.is_empty() {
-                        return None;
-                    }
-                }
-
-                let nodes: Vec<&crate::structure::Node> = result.selected.iter()
-                    .filter_map(|sel| graph.nodes.iter().find(|n| n.id == sel.node_id))
-                    .collect();
-                Some(nodes)
-            }
+        match predicate.evaluate(graph) {
+            PredicateResult::RankedList(list) => list.into_iter()
+                .filter_map(|(id, _)| graph.nodes.iter().find(|n| n.id == id))
+                .collect(),
+            PredicateResult::Bool(true) => graph.nodes.iter().collect(),
+            PredicateResult::Bool(false) => Vec::new(),
         }
     }
 
@@ -180,9 +131,9 @@ impl GeneralizedProgram {
     }
 
     fn apply_step(graph: &KernelStructureGraph, step: &AbstractStep, gw: u8, gh: u8) -> KernelStructureGraph {
-        let candidates: Vec<crate::structure::Node> = match Self::select_candidates(graph, step) {
-            Some(nodes) => nodes.into_iter().cloned().collect(),
-            None => Vec::new(), // Cardinality::ExactlyOne, de ambiguity/0 talalat -> nincs vegrehajtas
+        let candidates: Vec<crate::structure::Node> = match &step.condition {
+            Some(pred) => Self::matching_nodes(graph, pred.as_ref()).into_iter().cloned().collect(),
+            None => graph.nodes.clone(),
         };
 
         let mut result = graph.clone();

@@ -47,11 +47,6 @@ pub trait Predicate {
     fn evaluate(&self, graph: &KernelStructureGraph) -> PredicateResult;
     fn name(&self) -> &str;
     fn required_attributes(&self) -> Vec<String> { Vec::new() }
-    /// A predikatum "szemantikai specifikussaga" -- tie-breakhez hasznaljuk
-    /// az ObjectSelector-ban. Alapertelmezesben minden predikatum 1-et ad
-    /// vissza; osszetett predikatumok (And/Or/Not/Xor/If) felulirhatjak,
-    /// hogy tukrozzek a bennuk levo al-predikatumok szamat.
-    fn specificity(&self) -> u32 { 1 }
     /// Klónoz egy dobozolt predikátumot.
     fn clone_box(&self) -> Box<dyn Predicate>;
 }
