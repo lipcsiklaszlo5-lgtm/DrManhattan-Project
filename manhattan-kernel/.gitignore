@@ -1,2 +1,5 @@
 target/
 *.swp
+
+# scaffold-script biztonsagi mentesek
+*.bak.*

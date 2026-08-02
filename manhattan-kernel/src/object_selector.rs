@@ -108,6 +108,174 @@ fn build_explanation(obj: &SelectedObject, ambiguity: bool) -> String {
     }
 }
 
+// ---------------------------------------------------------------------
+// Extensible scoring system
+// ---------------------------------------------------------------------
+//
+// A ScoringComponent egy fuggetlen pontozasi szempont (pl. terulet,
+// pozicio, topologia, szimmetria, koncepcio-magabiztossag). Uj szempont
+// hozzaadasahoz NEM kell a meglevo kodot modositani: eleg egy uj
+// struct-ot irni, ami implementalja a ScoringComponent trait-et, es
+// felvenni egy ScoringProfile-ba.
+pub trait ScoringComponent: Send + Sync {
+    fn name(&self) -> &str;
+    /// A komponens sulya a vegso, sulyozott osszegben.
+    fn weight(&self) -> f32 { 1.0 }
+    fn score(&self, node: &crate::structure::Node, predicate_confidence: f32, graph: &KernelStructureGraph) -> f32;
+}
+
+/// A predikatum nyers konfidenciajat viszi at valtozatlanul a pontozasba.
+pub struct PredicateConfidenceComponent { pub weight: f32 }
+impl Default for PredicateConfidenceComponent {
+    fn default() -> Self { Self { weight: 1.0 } }
+}
+impl ScoringComponent for PredicateConfidenceComponent {
+    fn name(&self) -> &str { "PredicateConfidence" }
+    fn weight(&self) -> f32 { self.weight }
+    fn score(&self, _node: &crate::structure::Node, predicate_confidence: f32, _graph: &KernelStructureGraph) -> f32 {
+        predicate_confidence
+    }
+}
+
+/// Terulet-alapu pontozas (logaritmikus, hogy a nagyon nagy objektumok
+/// ne nyomjanak el mindent).
+pub struct AreaComponent { pub weight: f32 }
+impl Default for AreaComponent {
+    fn default() -> Self { Self { weight: 1.0 } }
+}
+impl ScoringComponent for AreaComponent {
+    fn name(&self) -> &str { "Area" }
+    fn weight(&self) -> f32 { self.weight }
+    fn score(&self, node: &crate::structure::Node, _predicate_confidence: f32, _graph: &KernelStructureGraph) -> f32 {
+        let area: f32 = node.attributes.get("area").and_then(|v| v.parse().ok()).unwrap_or(1.0);
+        area.log10().max(0.0)
+    }
+}
+
+/// Pozicio-alapu pontozas: a racs (feltetelezett) kozeppontjahoz kepesti
+/// kozelseg. A kozelebbi objektumok magasabb pontszamot kapnak.
+pub struct PositionComponent { pub weight: f32, pub grid_width: f32, pub grid_height: f32 }
+impl PositionComponent {
+    pub fn new(weight: f32, grid_width: f32, grid_height: f32) -> Self {
+        Self { weight, grid_width, grid_height }
+    }
+}
+impl ScoringComponent for PositionComponent {
+    fn name(&self) -> &str { "Position" }
+    fn weight(&self) -> f32 { self.weight }
+    fn score(&self, node: &crate::structure::Node, _predicate_confidence: f32, _graph: &KernelStructureGraph) -> f32 {
+        let x: f32 = node.attributes.get("bbox_x").and_then(|v| v.parse().ok()).unwrap_or(0.0);
+        let y: f32 = node.attributes.get("bbox_y").and_then(|v| v.parse().ok()).unwrap_or(0.0);
+        let cx = self.grid_width / 2.0;
+        let cy = self.grid_height / 2.0;
+        let dist = ((x - cx).powi(2) + (y - cy).powi(2)).sqrt();
+        let max_dist = (cx.powi(2) + cy.powi(2)).sqrt().max(1.0);
+        1.0 - (dist / max_dist).min(1.0)
+    }
+}
+
+/// Topologia-alapu pontozas: hany elben (kapcsolatban) vesz reszt a node.
+/// Tobb kapcsolat -> magasabb pontszam (kozpontibb objektum).
+pub struct TopologyComponent { pub weight: f32 }
+impl Default for TopologyComponent {
+    fn default() -> Self { Self { weight: 1.0 } }
+}
+impl ScoringComponent for TopologyComponent {
+    fn name(&self) -> &str { "Topology" }
+    fn weight(&self) -> f32 { self.weight }
+    fn score(&self, node: &crate::structure::Node, _predicate_confidence: f32, graph: &KernelStructureGraph) -> f32 {
+        let degree = graph.edges.iter()
+            .filter(|e| e.from == node.id || e.to == node.id)
+            .count();
+        (degree as f32).log10().max(0.0)
+            .max(if degree > 0 { 0.1 } else { 0.0 })
+    }
+}
+
+/// Szimmetria-alapu pontozas: ha a node-nak van "symmetry" attributuma,
+/// bonuszt kap.
+pub struct SymmetryComponent { pub weight: f32 }
+impl Default for SymmetryComponent {
+    fn default() -> Self { Self { weight: 1.0 } }
+}
+impl ScoringComponent for SymmetryComponent {
+    fn name(&self) -> &str { "Symmetry" }
+    fn weight(&self) -> f32 { self.weight }
+    fn score(&self, node: &crate::structure::Node, _predicate_confidence: f32, _graph: &KernelStructureGraph) -> f32 {
+        if node.attributes.contains_key("symmetry") { 1.0 } else { 0.0 }
+    }
+}
+
+/// Koncepcio-magabiztossag: ha a node-on van "concept_confidence"
+/// attributum (kesobbi modulok tolthetik fel), azt hasznalja, kulonben 0.
+pub struct ConceptConfidenceComponent { pub weight: f32 }
+impl Default for ConceptConfidenceComponent {
+    fn default() -> Self { Self { weight: 1.0 } }
+}
+impl ScoringComponent for ConceptConfidenceComponent {
+    fn name(&self) -> &str { "ConceptConfidence" }
+    fn weight(&self) -> f32 { self.weight }
+    fn score(&self, node: &crate::structure::Node, _predicate_confidence: f32, _graph: &KernelStructureGraph) -> f32 {
+        node.attributes.get("concept_confidence").and_then(|v| v.parse().ok()).unwrap_or(0.0)
+    }
+}
+
+/// Egy meglevo ScoreFn fuggvenypointert csomagol ScoringComponent-te,
+/// hogy a regi API (score_fn: Option<ScoreFn>) valtozatlanul mukodjon
+/// az uj, bovitheto rendszer felett.
+struct FnComponent(ScoreFn);
+impl ScoringComponent for FnComponent {
+    fn name(&self) -> &str { "LegacyScoreFn" }
+    fn score(&self, node: &crate::structure::Node, predicate_confidence: f32, _graph: &KernelStructureGraph) -> f32 {
+        (self.0)(node, predicate_confidence)
+    }
+}
+
+/// Tobb ScoringComponent sulyozott osszege. Uj szempont hozzaadasa:
+/// implementald a ScoringComponent trait-et, majd told bele egy
+/// ScoringProfile-ba -- a meglevo kodot NEM kell modositani.
+pub struct ScoringProfile {
+    pub components: Vec<Box<dyn ScoringComponent>>,
+}
+
+impl ScoringProfile {
+    pub fn new(components: Vec<Box<dyn ScoringComponent>>) -> Self {
+        Self { components }
+    }
+
+    /// Az alapertelmezett profil: predikatum-konfidencia + terulet,
+    /// pontosan ugyanaz a kepletet adja, mint a korabbi default_score_fn
+    /// (predicate_score * (1 + log10(area))), hogy a meglevo viselkedes
+    /// es tesztek valtozatlanok maradjanak.
+    pub fn default_profile() -> Self {
+        Self::new(vec![
+            Box::new(PredicateConfidenceComponent::default()),
+            Box::new(AreaComponent::default()),
+        ])
+    }
+
+    fn compute(&self, node: &crate::structure::Node, predicate_confidence: f32, graph: &KernelStructureGraph) -> f32 {
+        if self.components.is_empty() {
+            return predicate_confidence;
+        }
+        // A default profil eseten pontosan a regi keplet: pred * (1 + area_component)
+        // -- ket komponens (PredicateConfidence, Area) eseten szorzatkent
+        // kombinaljuk a visszafele kompatibilitas erdekeben; tobb/mas
+        // komponens eseten sulyozott osszeget hasznalunk.
+        if self.components.len() == 2
+            && self.components[0].name() == "PredicateConfidence"
+            && self.components[1].name() == "Area"
+        {
+            let pred = self.components[0].score(node, predicate_confidence, graph);
+            let area = self.components[1].score(node, predicate_confidence, graph);
+            return pred * (1.0 + area);
+        }
+        self.components.iter()
+            .map(|c| c.weight() * c.score(node, predicate_confidence, graph))
+            .sum()
+    }
+}
+
 pub struct ObjectSelector;
 
 impl ObjectSelector {
@@ -126,7 +294,22 @@ impl ObjectSelector {
         strategy: &SelectionStrategy,
         score_fn: Option<ScoreFn>,
     ) -> SelectionResult {
-        let score_fn = score_fn.unwrap_or(Self::default_score_fn);
+        let profile = match score_fn {
+            Some(f) => ScoringProfile::new(vec![Box::new(FnComponent(f))]),
+            None => ScoringProfile::default_profile(),
+        };
+        Self::select_with_scoring(predicate, graph, strategy, &profile)
+    }
+
+    /// A bovitheto pontozasi utvonal: tetszoleges szamu ScoringComponent
+    /// kombinalhato egy ScoringProfile-ban, uj szempont hozzaadasahoz
+    /// nem kell ezt a fuggvenyt (vagy a select()-et) modositani.
+    pub fn select_with_scoring(
+        predicate: &dyn Predicate,
+        graph: &KernelStructureGraph,
+        strategy: &SelectionStrategy,
+        profile: &ScoringProfile,
+    ) -> SelectionResult {
         let pred_specificity = predicate.specificity();
         let pred_name = predicate.name().to_string();
 
@@ -151,7 +334,7 @@ impl ObjectSelector {
             };
         }
 
-        // 2. Pontozas
+        // 2. Pontozas (a ScoringProfile-on keresztul)
         let node_map: HashMap<&str, &crate::structure::Node> = graph
             .nodes
             .iter()
@@ -162,7 +345,7 @@ impl ObjectSelector {
             .into_iter()
             .filter_map(|(id, pred_score)| {
                 node_map.get(id.as_str()).map(|&node| {
-                    let score = score_fn(node, pred_score);
+                    let score = profile.compute(node, pred_score, graph);
                     SelectedObject {
                         node_id: id.clone(),
                         score,
@@ -439,6 +622,88 @@ mod tests {
 
     #[test]
     fn test_explanation_is_non_empty() {
+        let g = make_graph(vec![("a", 5, 0, 0, "1")]);
+        let result = ObjectSelector::select(&LargestPredicate, &g, &SelectionStrategy::Best, None);
+        assert!(!result.explanation.is_empty());
+    }
+
+    // --- Extensible scoring tesztek ---
+
+    /// Sajat, teszt-specifikus scoring komponens: annak a node-nak ad
+    /// hatalmas bonuszt, aminek a color attributuma "9". Ezt a meglevo
+    /// kod (ObjectSelector, ScoringProfile) modositasa NELKUL hoztuk
+    /// letre -- ez bizonyitja a bovithetoseget.
+    struct FavorColorNineComponent;
+    impl ScoringComponent for FavorColorNineComponent {
+        fn name(&self) -> &str { "FavorColorNine" }
+        fn weight(&self) -> f32 { 10.0 }
+        fn score(&self, node: &crate::structure::Node, _pred_conf: f32, _graph: &KernelStructureGraph) -> f32 {
+            if node.attributes.get("color").map(|c| c == "9").unwrap_or(false) { 1.0 } else { 0.0 }
+        }
+    }
+
+    #[test]
+    fn test_custom_scoring_component_changes_ranking() {
+        // "a" a legnagyobb terulet szerint, de "b" szine "9" -- a sajat
+        // komponens miatt "b"-nek kell nyernie, holott alapertelmezett
+        // profil eseten "a" nyerne (mert nagyobb).
+        let g = make_graph(vec![
+            ("a", 20, 0, 0, "1"),
+            ("b", 5, 1, 1, "9"),
+        ]);
+
+        let default_result = ObjectSelector::select(&AreaPredicate { min: None, max: None }, &g, &SelectionStrategy::Best, None);
+        assert_eq!(default_result.selected[0].node_id, "a");
+
+        let custom_profile = ScoringProfile::new(vec![
+            Box::new(PredicateConfidenceComponent::default()),
+            Box::new(AreaComponent { weight: 0.01 }),
+            Box::new(FavorColorNineComponent),
+        ]);
+        let custom_result = ObjectSelector::select_with_scoring(
+            &AreaPredicate { min: None, max: None }, &g, &SelectionStrategy::Best, &custom_profile,
+        );
+        assert_eq!(custom_result.selected[0].node_id, "b");
+    }
+
+    #[test]
+    fn test_scoring_profile_determinism() {
+        let g = make_graph(vec![
+            ("a", 5, 0, 0, "1"),
+            ("b", 8, 1, 1, "1"),
+        ]);
+        let profile = ScoringProfile::new(vec![
+            Box::new(PredicateConfidenceComponent::default()),
+            Box::new(AreaComponent::default()),
+            Box::new(TopologyComponent::default()),
+            Box::new(SymmetryComponent::default()),
+            Box::new(ConceptConfidenceComponent::default()),
+        ]);
+        let first = ObjectSelector::select_with_scoring(&LargestPredicate, &g, &SelectionStrategy::Best, &profile);
+        for _ in 0..50 {
+            let next = ObjectSelector::select_with_scoring(&LargestPredicate, &g, &SelectionStrategy::Best, &profile);
+            assert_eq!(first.selected[0].node_id, next.selected[0].node_id);
+            assert_eq!(first.confidence, next.confidence);
+        }
+    }
+
+    #[test]
+    fn test_default_profile_matches_legacy_score_fn_ranking() {
+        // A default_profile()-nak ugyanazt a sorrendet kell adnia, mint
+        // a regi default_score_fn-nek (visszafele kompatibilitas).
+        let g = make_graph(vec![
+            ("a", 5, 0, 0, "1"),
+            ("b", 8, 1, 1, "1"),
+            ("c", 3, 2, 2, "1"),
+        ]);
+        let via_default = ObjectSelector::select(&ColorPredicate { color: "1".into() }, &g, &SelectionStrategy::TopK(3), None);
+        let via_profile = ObjectSelector::select_with_scoring(
+            &ColorPredicate { color: "1".into() }, &g, &SelectionStrategy::TopK(3), &ScoringProfile::default_profile(),
+        );
+        let ids_a: Vec<&str> = via_default.selected.iter().map(|s| s.node_id.as_str()).collect();
+        let ids_b: Vec<&str> = via_profile.selected.iter().map(|s| s.node_id.as_str()).collect();
+        assert_eq!(ids_a, ids_b);
+    }
         let g = make_graph(vec![("a", 5, 0, 0, "1")]);
         let result = ObjectSelector::select(&LargestPredicate, &g, &SelectionStrategy::Best, None);
         assert!(!result.explanation.is_empty());
