@@ -5,8 +5,45 @@ use super::semantic_descriptor::describe_node_all;
 use super::hypothesis::{SemanticStep};
 use crate::object_selector::ObjectSelector;
 use crate::predicate::Predicate;
-use crate::abstraction::program::TargetSpec;
+use crate::abstraction::program::{TargetSpec, GridCorner};
 use std::collections::HashMap as StdHashMap;
+
+/// Ha a node vegso (output-beli) pozicioja PONTOSAN a racs valamelyik
+/// sarkara esik, visszaadja a megfelelo GridAnchor target_spec-et.
+/// Ha nem esik pontosan sarokra, None -- ilyenkor NEM generalunk lepest
+/// erre a diff-re, mert nincs meg olyan altalanos eszkozunk (pl. relativ
+/// pozicionalas egy masik objektumhoz kepest), ami ezt helyesen le tudna
+/// irni. Egy None target_spec-es lepes generalasa hamis biztonsagot adna
+/// (a lepes soha nem hajtana vegre valos mozgatast).
+fn grid_anchor_for_node(
+    node_out: &crate::structure::Node,
+    grid_width: u8,
+    grid_height: u8,
+) -> Option<TargetSpec> {
+    let ax: i64 = node_out.attributes.get("bbox_x").and_then(|v| v.parse().ok())?;
+    let ay: i64 = node_out.attributes.get("bbox_y").and_then(|v| v.parse().ok())?;
+    let bw: i64 = node_out.attributes.get("bbox_w").and_then(|v| v.parse().ok())?;
+    let bh: i64 = node_out.attributes.get("bbox_h").and_then(|v| v.parse().ok())?;
+    let gw = grid_width as i64;
+    let gh = grid_height as i64;
+
+    let at_left = ax == 0;
+    let at_top = ay == 0;
+    let at_right = (ax + bw) == gw;
+    let at_bottom = (ay + bh) == gh;
+
+    if at_top && at_left {
+        Some(TargetSpec::GridAnchor { corner: GridCorner::TopLeft })
+    } else if at_top && at_right {
+        Some(TargetSpec::GridAnchor { corner: GridCorner::TopRight })
+    } else if at_bottom && at_left {
+        Some(TargetSpec::GridAnchor { corner: GridCorner::BottomLeft })
+    } else if at_bottom && at_right {
+        Some(TargetSpec::GridAnchor { corner: GridCorner::BottomRight })
+    } else {
+        None
+    }
+}
 
 pub fn generate_candidate_steps(
     input: &KernelStructureGraph,
@@ -18,16 +55,40 @@ pub fn generate_candidate_steps(
     let mut steps = Vec::new();
 
     for diff in diffs {
-        let (node_id, sem_transform) = match &diff {
-            NodeTransformation::Translate { node_id, .. } => {
-                let tr = abstract_translate(node_id, input, output, grid_width, grid_height);
-                (node_id, tr)
+        let node_id = match &diff {
+            NodeTransformation::Translate { node_id, .. } => node_id,
+            NodeTransformation::Recolor { node_id, .. } => node_id,
+            NodeTransformation::Delete { node_id } => node_id,
+            _ => continue,
+        };
+
+        let (sem_transform, target_spec): (Transformation, Option<TargetSpec>) = match &diff {
+            NodeTransformation::Translate { .. } => {
+                let mirror_or_translate = abstract_translate(node_id, input, output, grid_width, grid_height);
+                match mirror_or_translate {
+                    Transformation::SemanticMirrorHorizontal | Transformation::SemanticMirrorVertical => {
+                        (mirror_or_translate, None)
+                    }
+                    _ => {
+                        // Csak akkor generalunk lepest, ha a celpozicio egy
+                        // racs-sarokra esik pontosan -- egyeb esetben nincs
+                        // meg altalanos eszkozunk a celpozicio leirasara.
+                        let node_out = match output.nodes.iter().find(|n| n.id == *node_id) {
+                            Some(n) => n,
+                            None => continue,
+                        };
+                        match grid_anchor_for_node(node_out, grid_width, grid_height) {
+                            Some(spec) => (Transformation::SemanticTranslateToTarget, Some(spec)),
+                            None => continue,
+                        }
+                    }
+                }
             }
-            NodeTransformation::Recolor { node_id, new_color: _ } => {
-                (node_id, Transformation::SemanticRecolorToTarget)
+            NodeTransformation::Recolor { new_color, .. } => {
+                (Transformation::SemanticRecolorToTarget, Some(TargetSpec::Constant(new_color.clone())))
             }
-            NodeTransformation::Delete { node_id } => {
-                (node_id, Transformation::Delete { node_id: String::new() })
+            NodeTransformation::Delete { .. } => {
+                (Transformation::Delete { node_id: String::new() }, None)
             }
             _ => continue,
         };
@@ -37,12 +98,7 @@ pub fn generate_candidate_steps(
             steps.push(SemanticStep {
                 condition: Some(preds),
                 transformation: sem_transform.clone(),
-                target_spec: match &diff {
-                    NodeTransformation::Recolor { new_color, .. } => {
-                        Some(TargetSpec::Constant(new_color.clone()))
-                    }
-                    _ => None,
-                },
+                target_spec: target_spec.clone(),
             });
         }
     }
@@ -69,25 +125,33 @@ fn abstract_translate(
     Transformation::SemanticTranslateToTarget
 }
 
-/// Egy jelolt-lepes "alairasa": a transzformacio ALAKJA (nem a konkret erteke,
-/// pl. SemanticRecolorToTarget mindig ugyanugy nez ki fuggetlenul a celszintol)
-/// plusz a feltetel-predikatumok NEVEINEK rendezett halmaza. Ket lepes akkor
-/// "ugyanaz", ha ez az alairas megegyezik -- FUGGETLENUL attol, hanyadik
-/// helyen allnak a jelolt-listaban (a describe_node_all parononkent eltero
-/// szamu alternativat adhat vissza, ezert a POZICIO szerinti egyeztetes
-/// megbizhatatlan volt).
-fn step_signature(step: &SemanticStep) -> (String, Vec<String>) {
+/// Egy jelolt-lepes "alairasa": a transzformacio ALAKJA, a feltetel-nevek
+/// rendezett halmaza, ES a target_spec FAJTAJA (nem a konkret erteke -- azt
+/// a constant_target_matches ellenorzi kulon). Igy pl. ket
+/// SemanticTranslateToTarget lepes csak akkor szamit "ugyanannak", ha
+/// mindketto pl. GridAnchor tipusu -- egy GridAnchor es egy semmilyen
+/// target_spec nelkuli lepes nem keveredik ossze.
+fn step_signature(step: &SemanticStep) -> (String, Vec<String>, String) {
     let transformation_shape = format!("{:?}", step.transformation);
     let mut cond_names: Vec<String> = step.condition.as_ref()
         .map(|preds| preds.iter().map(|p| p.name().to_string()).collect())
         .unwrap_or_default();
     cond_names.sort();
-    (transformation_shape, cond_names)
+    let target_kind = match &step.target_spec {
+        None => "None".to_string(),
+        Some(TargetSpec::Constant(_)) => "Constant".to_string(),
+        Some(TargetSpec::GridAnchor { corner }) => format!("GridAnchor:{:?}", corner),
+        Some(TargetSpec::RelativeToNode { .. }) => "RelativeToNode".to_string(),
+        Some(TargetSpec::CopyAttributeFrom { .. }) => "CopyAttributeFrom".to_string(),
+    };
+    (transformation_shape, cond_names, target_kind)
 }
 
 /// Ha a lepes target_spec-je Constant(...), az ertekenek meg kell egyeznie
-/// MINDEN parban -- kulonben a lepes nem egy valodi altalanos szabaly, hanem
-/// csak veletlen egybeeses volt az adott parban.
+/// MINDEN parban. A GridAnchor mar a step_signature resze (a sarok maga is
+/// a signature-be van kodolva), tehat ha a signature-k egyeznek, a sarok is
+/// automatikusan egyezik -- itt csak a Constant erteket kell tovabb
+/// ellenorizni.
 fn constant_target_matches(steps: &[&SemanticStep]) -> bool {
     let values: Vec<Option<&String>> = steps.iter().map(|s| match &s.target_spec {
         Some(TargetSpec::Constant(v)) => Some(v),
@@ -103,10 +167,10 @@ fn constant_target_matches(steps: &[&SemanticStep]) -> bool {
 
 /// Közös szemantikus lépések generálása több train párból.
 /// Halmaz-alapu (nem pozicio-alapu) egyeztetes: minden parra osszegyujtjuk a
-/// jelolt lepesek "alairasait", majd csak azokat tartjuk meg, amik MINDEN
-/// parban elofordulnak, ES ha van konstans celertek, az is egyezik mindenhol,
-/// ES a feltetel minden parban egyertelmuen (ambiguity=false) egy node-ot
-/// valaszt ki.
+/// jelolt lepesek "alairasait" (transzformacio + feltetelek + target_spec
+/// fajtaja), majd csak azokat tartjuk meg, amik MINDEN parban elofordulnak,
+/// ES a Constant celertek is egyezik mindenhol, ES a feltetel minden parban
+/// egyertelmuen (ambiguity=false) egy node-ot valaszt ki.
 pub fn generate_common_steps(
     train_pairs: &[(KernelStructureGraph, KernelStructureGraph, u8, u8)],
 ) -> Vec<SemanticStep> {
@@ -134,8 +198,7 @@ pub fn generate_common_steps(
         all_candidates.push(steps);
     }
 
-    // Az elso par jelolt-alairasai lesznek a kiindulo halmaz (dedupolva).
-    let mut pair0_by_sig: StdHashMap<(String, Vec<String>), &SemanticStep> = StdHashMap::new();
+    let mut pair0_by_sig: StdHashMap<(String, Vec<String>, String), &SemanticStep> = StdHashMap::new();
     for step in &all_candidates[0] {
         pair0_by_sig.entry(step_signature(step)).or_insert(step);
     }
