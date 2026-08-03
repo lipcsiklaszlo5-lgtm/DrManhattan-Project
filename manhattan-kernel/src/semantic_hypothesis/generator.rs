@@ -284,7 +284,6 @@ fn step_signature(step: &SemanticStep) -> (String, Vec<String>, String) {
             format!("RelativeToNode:{}", condition.name())
         }
         Some(TargetSpec::CopyAttributeFrom { .. }) => "CopyAttributeFrom".to_string()
-        Some(TargetSpec::GravitateAnchor { anchor_predicate }) => format!("GravitateAnchor:{}", anchor_predicate.name()),
     };
     (transformation_shape, cond_names, target_kind)
 }

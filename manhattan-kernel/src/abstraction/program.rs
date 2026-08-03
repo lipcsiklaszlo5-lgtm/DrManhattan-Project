@@ -69,7 +69,6 @@ pub enum TargetSpec {
     RelativeToNode { condition: Box<Condition>, dx_offset: i64, dy_offset: i64 },
     GridAnchor { corner: GridCorner },
     CopyAttributeFrom { condition: Box<Condition>, attribute: String },
-    /// Anchor for Gravitate transformation: the object to gravitate toward
     GravitateAnchor { anchor_predicate: Box<dyn Predicate> },
 }
 
@@ -191,7 +190,6 @@ impl GeneralizedProgram {
     }
 
 
-/// Calculate the translation needed for `moving` to touch `anchor`.
 fn gravitate(moving: &crate::structure::Node, anchor: &crate::structure::Node) -> (i64, i64) {
     let mx: i64 = moving.attributes.get("bbox_x").and_then(|v| v.parse().ok()).unwrap_or(0);
     let my: i64 = moving.attributes.get("bbox_y").and_then(|v| v.parse().ok()).unwrap_or(0);
