@@ -20,6 +20,7 @@ fn grid_anchor_for_node(
     grid_width: u8,
     grid_height: u8,
 ) -> Option<TargetSpec> {
+    let diag = std::env::var("MK_DIAG").is_ok();
     let ax: i64 = node_out.attributes.get("bbox_x").and_then(|v| v.parse().ok())?;
     let ay: i64 = node_out.attributes.get("bbox_y").and_then(|v| v.parse().ok())?;
     let bw: i64 = node_out.attributes.get("bbox_w").and_then(|v| v.parse().ok())?;
@@ -27,10 +28,18 @@ fn grid_anchor_for_node(
     let gw = grid_width as i64;
     let gh = grid_height as i64;
 
+    if diag {
+        eprintln!("[DIAG-GA] node bbox=({},{},{},{}) grid=({},{})", ax, ay, bw, bh, gw, gh);
+    }
+
     let at_left = ax == 0;
     let at_top = ay == 0;
     let at_right = (ax + bw) == gw;
     let at_bottom = (ay + bh) == gh;
+
+    if diag {
+        eprintln!("[DIAG-GA]   at_left={} at_top={} at_right={} at_bottom={}", at_left, at_top, at_right, at_bottom);
+    }
 
     if at_top && at_left {
         Some(TargetSpec::GridAnchor { corner: GridCorner::TopLeft })
@@ -79,7 +88,38 @@ pub fn generate_candidate_steps(
                         };
                         match grid_anchor_for_node(node_out, grid_width, grid_height) {
                             Some(spec) => (Transformation::SemanticTranslateToTarget, Some(spec)),
-                            None => continue,
+                            None => {
+                                // Próbáljunk relatív célpontot generálni egy referencia objektumhoz képest
+                                if let Some(ref_node) = input.nodes.iter()
+                                    .filter(|n| n.id != *node_id)
+                                    .max_by_key(|n| n.attributes.get("area").and_then(|v| v.parse::<u64>().ok()).unwrap_or(0))
+                                {
+                                    if let Some(ref_preds) = describe_node_all(&ref_node.id, input).into_iter().next() {
+                                        let ref_x: i64 = ref_node.attributes.get("bbox_x").and_then(|v| v.parse().ok()).unwrap_or(0);
+                                        let ref_y: i64 = ref_node.attributes.get("bbox_y").and_then(|v| v.parse().ok()).unwrap_or(0);
+                                        let ax: i64 = node_out.attributes.get("bbox_x").and_then(|v| v.parse().ok()).unwrap_or(0);
+                                        let ay: i64 = node_out.attributes.get("bbox_y").and_then(|v| v.parse().ok()).unwrap_or(0);
+                                        let rel_dx = ax - ref_x;
+                                        let rel_dy = ay - ref_y;
+                                        let ref_pred: Box<dyn Predicate> = if ref_preds.len() == 1 {
+                                            ref_preds[0].clone_box()
+                                        } else {
+                                            Box::new(crate::predicate::builtin::AndPredicate {
+                                                predicates: ref_preds.iter().map(|p| p.clone_box()).collect(),
+                                            })
+                                        };
+                                        (Transformation::SemanticTranslateToTarget, Some(TargetSpec::RelativeToPredicate {
+                                            predicate: ref_pred,
+                                            dx_offset: rel_dx,
+                                            dy_offset: rel_dy,
+                                        }))
+                                    } else {
+                                        continue
+                                    }
+                                } else {
+                                    continue
+                                }
+                            }
                         }
                     }
                 }
@@ -143,6 +183,7 @@ fn step_signature(step: &SemanticStep) -> (String, Vec<String>, String) {
         Some(TargetSpec::GridAnchor { corner }) => format!("GridAnchor:{:?}", corner),
         Some(TargetSpec::RelativeToNode { .. }) => "RelativeToNode".to_string(),
         Some(TargetSpec::CopyAttributeFrom { .. }) => "CopyAttributeFrom".to_string(),
+        Some(TargetSpec::RelativeToPredicate { .. }) => "RelativeToPredicate".to_string(),
     };
     (transformation_shape, cond_names, target_kind)
 }

@@ -67,6 +67,8 @@ impl std::fmt::Debug for AbstractStep {
 pub enum TargetSpec {
     Constant(String),
     RelativeToNode { condition: Box<Condition>, dx_offset: i64, dy_offset: i64 },
+    /// Új: predikátum-alapú relatív pozícionálás (SHE-kompatibilis)
+    RelativeToPredicate { predicate: Box<dyn Predicate>, dx_offset: i64, dy_offset: i64 },
     GridAnchor { corner: GridCorner },
     CopyAttributeFrom { condition: Box<Condition>, attribute: String },
 }
@@ -174,6 +176,14 @@ impl GeneralizedProgram {
                 if let Some(ref_node) = refs.first() {
                     let val = ref_node.attributes.get(attribute).cloned();
                     Some((0, 0, val))
+                } else { None }
+            }
+            TargetSpec::RelativeToPredicate { predicate, dx_offset, dy_offset } => {
+                let refs = Self::matching_nodes(graph, predicate.as_ref());
+                if let Some(ref_node) = refs.first() {
+                    let rx: i64 = ref_node.attributes.get("bbox_x").and_then(|v| v.parse().ok()).unwrap_or(0);
+                    let ry: i64 = ref_node.attributes.get("bbox_y").and_then(|v| v.parse().ok()).unwrap_or(0);
+                    Some((rx + dx_offset, ry + dy_offset, None))
                 } else { None }
             }
         }
