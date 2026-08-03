@@ -126,7 +126,27 @@ pub fn generate_candidate_steps(
                                                 dy_offset: rel_dy,
                                             }
                                         };
-                                        (Transformation::SemanticTranslateToTarget, Some(target_spec))
+                                        // Try Gravitate detection: if the movement is a pure axis-aligned slide to touch
+                                        let gravitate_dx = ax - ref_x;
+                                        let gravitate_dy = ay - ref_y;
+                                        let is_gravitate = (gravitate_dx == 0 && gravitate_dy != 0) || (gravitate_dy == 0 && gravitate_dx != 0);
+                                        if is_gravitate {
+                                            // Check if the final position touches the reference
+                                            let touching = (ax + node_out.attributes.get("bbox_w").and_then(|v| v.parse::<i64>().ok()).unwrap_or(0) == ref_x)
+                                                || (ax == ref_x + ref_node.attributes.get("bbox_w").and_then(|v| v.parse::<i64>().ok()).unwrap_or(0))
+                                                || (ay + node_out.attributes.get("bbox_h").and_then(|v| v.parse::<i64>().ok()).unwrap_or(0) == ref_y)
+                                                || (ay == ref_y + ref_node.attributes.get("bbox_h").and_then(|v| v.parse::<i64>().ok()).unwrap_or(0));
+                                            if touching {
+                                                let gravitate_spec = TargetSpec::GravitateAnchor {
+                                                    anchor_predicate: Box::new(Condition::Predicate(ref_pred.clone_box())),
+                                                };
+                                                (Transformation::SemanticGravitate, Some(gravitate_spec))
+                                            } else {
+                                                (Transformation::SemanticTranslateToTarget, Some(target_spec))
+                                            }
+                                        } else {
+                                            (Transformation::SemanticTranslateToTarget, Some(target_spec))
+                                        }
                                     } else {
                                         continue
                                     }
