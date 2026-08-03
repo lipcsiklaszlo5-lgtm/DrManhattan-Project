@@ -192,7 +192,6 @@ impl GeneralizedProgram {
 
 
 /// Calculate the translation needed for `moving` to touch `anchor`.
-/// If columns overlap -> vertical movement; if rows overlap -> horizontal.
 fn gravitate(moving: &crate::structure::Node, anchor: &crate::structure::Node) -> (i64, i64) {
     let mx: i64 = moving.attributes.get("bbox_x").and_then(|v| v.parse().ok()).unwrap_or(0);
     let my: i64 = moving.attributes.get("bbox_y").and_then(|v| v.parse().ok()).unwrap_or(0);
@@ -203,32 +202,30 @@ fn gravitate(moving: &crate::structure::Node, anchor: &crate::structure::Node) -
     let aw: i64 = anchor.attributes.get("bbox_w").and_then(|v| v.parse().ok()).unwrap_or(1);
     let ah: i64 = anchor.attributes.get("bbox_h").and_then(|v| v.parse().ok()).unwrap_or(1);
 
-    let col_overlap = mx < ax + aw && mx + mw > ax;  // oszlop-tartomány átfedés
-    let row_overlap = my < ay + ah && my + mh > ay;  // sor-tartomány átfedés
+    let col_overlap = mx < ax + aw && mx + mw > ax;
+    let row_overlap = my < ay + ah && my + mh > ay;
 
     if col_overlap && !row_overlap {
-        // Függőleges mozgás
         let dy = if my + mh <= ay {
-            ay - (my + mh)  // mozgó a horgony alatt
+            ay - (my + mh)
         } else {
-            ay + ah - my    // mozgó a horgony felett
+            ay + ah - my
         };
         (0, dy)
     } else if row_overlap && !col_overlap {
-        // Vízszintes mozgás
         let dx = if mx + mw <= ax {
-            ax - (mx + mw)  // mozgó a horgonytól balra
+            ax - (mx + mw)
         } else {
-            ax + aw - mx    // mozgó a horgonytól jobbra
+            ax + aw - mx
         };
         (dx, 0)
     } else {
-        // Ha mindkét tengelyen átfedés van, vagy egyiken sem, nincs egyértelmű mozgás
         (0, 0)
     }
 }
 
     fn apply_step(graph: &KernelStructureGraph, step: &AbstractStep, gw: u8, gh: u8) -> KernelStructureGraph {
+
         let candidates: Vec<crate::structure::Node> = match Self::select_candidates(graph, step) {
             Some(nodes) => nodes.into_iter().cloned().collect(),
             None => Vec::new(), // Cardinality::ExactlyOne, de ambiguity/0 talalat -> nincs vegrehajtas
@@ -292,7 +289,6 @@ fn gravitate(moving: &crate::structure::Node, anchor: &crate::structure::Node) -
                 Transformation::SemanticGravitate => {
                     if let Some(spec) = &step.target_spec {
                         if let Some((ax, ay, _)) = Self::resolve_target_spec(spec, graph, gw, gh) {
-                            // Keressük meg a horgony objektumot
                             if let Some(anchor_node) = graph.nodes.iter().find(|n| {
                                 let nx: i64 = n.attributes.get("bbox_x").and_then(|v| v.parse().ok()).unwrap_or(0);
                                 let ny: i64 = n.attributes.get("bbox_y").and_then(|v| v.parse().ok()).unwrap_or(0);
