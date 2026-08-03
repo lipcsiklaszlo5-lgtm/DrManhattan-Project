@@ -94,6 +94,25 @@ pub enum TargetSpec {
     SemanticRelation { relation: SpatialRelation, anchor_predicate: Box<dyn Predicate> },
 }
 
+
+impl PartialEq for TargetSpec {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (TargetSpec::Constant(a), TargetSpec::Constant(b)) => a == b,
+            (TargetSpec::RelativeToNode { condition: c1, dx_offset: dx1, dy_offset: dy1 },
+             TargetSpec::RelativeToNode { condition: c2, dx_offset: dx2, dy_offset: dy2 }) =>
+                c1 == c2 && dx1 == dx2 && dy1 == dy2,
+            (TargetSpec::GridAnchor { corner: c1 }, TargetSpec::GridAnchor { corner: c2 }) => c1 == c2,
+            (TargetSpec::CopyAttributeFrom { condition: c1, attribute: a1 },
+             TargetSpec::CopyAttributeFrom { condition: c2, attribute: a2 }) => c1 == c2 && a1 == a2,
+            (TargetSpec::SemanticRelation { relation: r1, anchor_predicate: p1 },
+             TargetSpec::SemanticRelation { relation: r2, anchor_predicate: p2 }) =>
+                r1 == r2 && p1.name() == p2.name(),
+            _ => false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum GridCorner { TopLeft, TopRight, BottomLeft, BottomRight }
 
