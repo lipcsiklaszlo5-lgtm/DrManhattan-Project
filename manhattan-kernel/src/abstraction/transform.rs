@@ -152,7 +152,12 @@ impl Predicate for Condition {
         }
     }
 
-    fn name(&self) -> &str { "Condition" }
+    fn name(&self) -> &str {
+        match self {
+            Condition::Predicate(p) => p.name(),
+            _ => "Condition",
+        }
+    }
 
     fn clone_box(&self) -> Box<dyn Predicate> {
         Box::new(self.clone())
