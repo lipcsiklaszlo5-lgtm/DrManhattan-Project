@@ -32,24 +32,29 @@ fn generate_prompt() {
         diff_text.push_str(&format!("Pair {}: {:?}\n", i, diffs));
     }
 
-    let grids_text = train_inputs.iter().zip(train_outputs.iter()).enumerate()
-        .map(|(i, (inp, out))| format!("Pair {}:\n{}\n->\n{}\n", i, grid_to_string(inp), grid_to_string(out)))
-        .collect::<Vec<_>>().join("\n");
+    let mut grids_text = String::new();
+    for (i, (inp, out)) in train_inputs.iter().zip(train_outputs.iter()).enumerate() {
+        grids_text.push_str(&format!("Pair {}:\n{}\n->\n{}\n\n", i, grid_to_string(inp), grid_to_string(out)));
+    }
+
+    let operators = vec![
+        "Predicates: Largest, Smallest, Leftmost, Rightmost, Topmost, Bottommost, ColorEquals(N), UniqueColor, MajorityColor, MinorityColor",
+        "Transformations: SemanticTranslateToTarget, SemanticRecolorToTarget, SemanticMirrorHorizontal, SemanticMirrorVertical, SemanticGravitate",
+        "TargetSpec types: RelativeToNode(relation: Above/Below/LeftOf/RightOf/TouchingTop/TouchingBottom/TouchingLeft/TouchingRight/CenteredX/CenteredY), Constant(value), GridAnchor(corner: TopLeft/TopRight/BottomLeft/BottomRight), GravitateAnchor(anchor_predicate)",
+        "Cardinalities: All, ExactlyOne, AtMostOne",
+        "Output ONLY valid JSON (no extra text): {\"steps\":[{\"condition\":{\"type\":\"Largest\"},\"transformation\":\"SemanticTranslateToTarget\",\"target_spec\":{\"type\":\"RelativeToNode\",\"anchor_predicate\":{\"type\":\"Smallest\"},\"relation\":\"TouchingTop\"},\"cardinality\":\"All\"}]}"
+    ].join("\n");
 
     let prompt = format!(
-        "You are an ARC task solver. Given the training examples and available operators, generate ONE JSON program that transforms the input grid into the output grid.\n\n\
-        Grids (input -> output):\n{}\n\n\
-        Graph diffs (what changed):\n{}\n\n\
-        Available predicates: Largest, Smallest, Leftmost, Rightmost, Topmost, Bottommost, ColorEquals(N), UniqueColor, MajorityColor, MinorityColor.\n\
-        Available transformations: SemanticTranslateToTarget, SemanticRecolorToTarget, SemanticMirrorHorizontal, SemanticMirrorVertical, SemanticGravitate.\n\
-        TargetSpec types: RelativeToNode(relation: Above/Below/LeftOf/RightOf/TouchingTop/TouchingBottom/TouchingLeft/TouchingRight/CenteredX/CenteredY), Constant(value), GridAnchor(corner: TopLeft/TopRight/BottomLeft/BottomRight), GravitateAnchor(anchor_predicate).\n\
-        Cardinalities: All, ExactlyOne, AtMostOne.\n\n\
-        Output ONLY valid JSON (no extra text): {{\"steps\":[{{\"condition\":{{\"type\":\"Largest\"}},\"transformation\":\"SemanticTranslateToTarget\",\"target_spec\":{{\"type\":\"RelativeToNode\",\"anchor_predicate\":{{\"type\":\"Smallest\"}},\"relation\":\"TouchingTop\"}},\"cardinality\":\"All\"}}]}}",
-        grids_text, diff_text
+        "You are an ARC task solver. Given the training examples and available operators, generate ONE JSON program that transforms the input grid into the output grid.\n\nGrids (input -> output):\n{}\nGraph diffs (what changed):\n{}\n\nAvailable operators:\n{}",
+        grids_text, diff_text, operators
     );
 
     fs::write("phase0_prompt.txt", &prompt).expect("Failed to write prompt file");
     println!("=== PROMPT WRITTEN TO phase0_prompt.txt ===");
+    println!("Copy the content of this file to an LLM chat (e.g., chat.deepseek.com, gemini.google.com).");
+    println!("Save the LLM's response to phase0_response.txt.");
+    println!("Then run: cargo run --release --bin phase0b_poc -- --eval phase0_response.txt");
 }
 
 fn evaluate_response(response_path: &str) {
