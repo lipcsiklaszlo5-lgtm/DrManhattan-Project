@@ -64,11 +64,34 @@ impl std::fmt::Debug for AbstractStep {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+/// Spatial relation between two objects (anchor → target)
+#[derive(Debug, Clone, PartialEq)]
+pub enum SpatialRelation {
+    Above,
+    Below,
+    LeftOf,
+    RightOf,
+    TouchingNorth,
+    TouchingSouth,
+    TouchingEast,
+    TouchingWest,
+    AlignTop,
+    AlignBottom,
+    AlignLeft,
+    AlignRight,
+    CenterInside,
+    MirrorHorizontal,
+    MirrorVertical,
+    RotateAround,
+}
+
 pub enum TargetSpec {
     Constant(String),
     RelativeToNode { condition: Box<Condition>, dx_offset: i64, dy_offset: i64 },
     GridAnchor { corner: GridCorner },
     CopyAttributeFrom { condition: Box<Condition>, attribute: String },
+    /// Semantic spatial relation between moved object and anchor
+    SemanticRelation { relation: SpatialRelation, anchor_predicate: Box<dyn Predicate> },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -174,6 +197,36 @@ impl GeneralizedProgram {
                 if let Some(ref_node) = refs.first() {
                     let val = ref_node.attributes.get(attribute).cloned();
                     Some((0, 0, val))
+                } else { None }
+            }
+            TargetSpec::SemanticRelation { relation, anchor_predicate } => {
+                let refs = Self::matching_nodes(graph, anchor_predicate.as_ref());
+                if let Some(ref_node) = refs.first() {
+                    let rx: i64 = ref_node.attributes.get("bbox_x").and_then(|v| v.parse().ok()).unwrap_or(0);
+                    let ry: i64 = ref_node.attributes.get("bbox_y").and_then(|v| v.parse().ok()).unwrap_or(0);
+                    let rw: i64 = ref_node.attributes.get("bbox_w").and_then(|v| v.parse().ok()).unwrap_or(0);
+                    let rh: i64 = ref_node.attributes.get("bbox_h").and_then(|v| v.parse().ok()).unwrap_or(0);
+                    // A mozgó objektum méreteit is kiolvassuk a kiválasztott node-ból (a hívó oldalon)
+                    // Itt a célkoordinátákat a reláció alapján számoljuk
+                    let (tx, ty) = match relation {
+                        SpatialRelation::Above => (rx + rw/2, ry - rh/2),
+                        SpatialRelation::Below => (rx + rw/2, ry + rh + rh/2),
+                        SpatialRelation::LeftOf => (rx - rw/2, ry + rh/2),
+                        SpatialRelation::RightOf => (rx + rw + rw/2, ry + rh/2),
+                        SpatialRelation::TouchingNorth => (rx + rw/2, ry),
+                        SpatialRelation::TouchingSouth => (rx + rw/2, ry + rh),
+                        SpatialRelation::TouchingEast => (rx + rw, ry + rh/2),
+                        SpatialRelation::TouchingWest => (rx, ry + rh/2),
+                        SpatialRelation::AlignTop => (rx + rw/2, ry),
+                        SpatialRelation::AlignBottom => (rx + rw/2, ry + rh),
+                        SpatialRelation::AlignLeft => (rx, ry + rh/2),
+                        SpatialRelation::AlignRight => (rx + rw, ry + rh/2),
+                        SpatialRelation::CenterInside => (rx + rw/2, ry + rh/2),
+                        SpatialRelation::MirrorHorizontal => (grid_width as i64 - rx - rw, ry),
+                        SpatialRelation::MirrorVertical => (rx, grid_height as i64 - ry - rh),
+                        SpatialRelation::RotateAround => (rx + rw/2, ry + rh/2), // placeholder
+                    };
+                    Some((tx, ty, None))
                 } else { None }
             }
 
