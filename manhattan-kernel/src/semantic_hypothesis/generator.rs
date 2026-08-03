@@ -109,10 +109,10 @@ pub fn generate_candidate_steps(
                                                 predicates: ref_preds.iter().map(|p| p.clone_box()).collect(),
                                             })
                                         };
-                                        let condition = Condition::Predicate(ref_pred.clone_box());
+                                        let _condition = Condition::Predicate(ref_pred.clone_box());
                                         // Infer semantic relation if possible
                                         let relation = infer_spatial_relation(node_out, &ref_node);
-                                        let target_spec = if let Some(rel_name) = relation {
+                                        let target_spec = if let Some(_rel_name) = relation {
                                             // Use the relation as part of the target_kind in step_signature
                                             TargetSpec::RelativeToNode {
                                                 condition: Box::new(Condition::Predicate(ref_pred)),
@@ -283,7 +283,8 @@ fn step_signature(step: &SemanticStep) -> (String, Vec<String>, String) {
             // Ha van felismert reláció, azt használjuk a szignatúrában
             format!("RelativeToNode:{}", condition.name())
         }
-        Some(TargetSpec::CopyAttributeFrom { .. }), => "CopyAttributeFrom".to_string()
+        Some(TargetSpec::CopyAttributeFrom { .. }) => "CopyAttributeFrom".to_string(),
+        Some(TargetSpec::GravitateAnchor { anchor_predicate }) => format!("GravitateAnchor:{}", anchor_predicate.name()),
     };
     (transformation_shape, cond_names, target_kind)
 }
