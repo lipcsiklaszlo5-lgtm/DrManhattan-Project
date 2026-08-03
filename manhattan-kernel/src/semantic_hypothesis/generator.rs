@@ -183,7 +183,9 @@ fn step_signature(step: &SemanticStep) -> (String, Vec<String>, String) {
         Some(TargetSpec::GridAnchor { corner }) => format!("GridAnchor:{:?}", corner),
         Some(TargetSpec::RelativeToNode { .. }) => "RelativeToNode".to_string(),
         Some(TargetSpec::CopyAttributeFrom { .. }) => "CopyAttributeFrom".to_string(),
-        Some(TargetSpec::RelativeToPredicate { .. }) => "RelativeToPredicate".to_string(),
+        Some(TargetSpec::RelativeToPredicate { predicate, .. }) => {
+            format!("RelativeToPredicate:{}", predicate.name())
+        }
     };
     (transformation_shape, cond_names, target_kind)
 }

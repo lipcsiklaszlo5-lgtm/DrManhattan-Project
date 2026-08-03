@@ -63,7 +63,7 @@ impl std::fmt::Debug for AbstractStep {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub enum TargetSpec {
     Constant(String),
     RelativeToNode { condition: Box<Condition>, dx_offset: i64, dy_offset: i64 },
