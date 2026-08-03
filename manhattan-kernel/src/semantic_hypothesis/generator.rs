@@ -196,16 +196,22 @@ fn step_signature(step: &SemanticStep) -> (String, Vec<String>, String) {
 /// automatikusan egyezik -- itt csak a Constant erteket kell tovabb
 /// ellenorizni.
 fn constant_target_matches(steps: &[&SemanticStep]) -> bool {
-    let values: Vec<Option<&String>> = steps.iter().map(|s| match &s.target_spec {
-        Some(TargetSpec::Constant(v)) => Some(v),
+    // Extract constant string values, compare as strings
+    let strings: Vec<Option<String>> = steps.iter().map(|s| match &s.target_spec {
+        Some(TargetSpec::Constant(v)) => Some(v.clone()),
         _ => None,
     }).collect();
-    let has_constant = values.iter().any(|v| v.is_some());
-    if !has_constant {
-        return true;
+    if strings.iter().all(|s| s.is_none()) {
+        return true; // no constants, no mismatch possible
     }
-    let first = values[0];
-    values.iter().all(|v| *v == first)
+    let first = match strings.iter().find(|s| s.is_some()) {
+        Some(Some(v)) => v,
+        _ => return true,
+    };
+    strings.iter().all(|s| match s {
+        Some(v) => v == first,
+        None => true,
+    })
 }
 
 /// Közös szemantikus lépések generálása több train párból.
