@@ -113,32 +113,52 @@ pub fn generate_candidate_steps(
                                         // Clone ref_pred for multiple uses
                                         let ref_pred_clone = ref_pred.clone_box();
 
-                                        // 1. Create RelativeToNode step
-                                        let relative_spec = TargetSpec::RelativeToNode {
-                                            condition: Box::new(Condition::Predicate(ref_pred)),
-                                            dx_offset: rel_dx,
-                                            dy_offset: rel_dy,
-                                        };
-
-                                        // 2. Try Gravitate detection
-                                        let gravitate_dx = ax - ref_x;
-                                        let gravitate_dy = ay - ref_y;
-                                        let is_gravitate = (gravitate_dx == 0 && gravitate_dy != 0) || (gravitate_dy == 0 && gravitate_dx != 0);
-                                        if is_gravitate {
-                                            let touching = (ax + node_out.attributes.get("bbox_w").and_then(|v| v.parse::<i64>().ok()).unwrap_or(0) == ref_x)
-                                                || (ax == ref_x + ref_node.attributes.get("bbox_w").and_then(|v| v.parse::<i64>().ok()).unwrap_or(0))
-                                                || (ay + node_out.attributes.get("bbox_h").and_then(|v| v.parse::<i64>().ok()).unwrap_or(0) == ref_y)
-                                                || (ay == ref_y + ref_node.attributes.get("bbox_h").and_then(|v| v.parse::<i64>().ok()).unwrap_or(0));
-                                            if touching {
-                                                let gravitate_spec = TargetSpec::GravitateAnchor {
-                                                    anchor_predicate: Box::new(Condition::Predicate(ref_pred_clone)),
-                                                };
-                                                (Transformation::SemanticGravitate, Some(gravitate_spec))
-                                            } else {
-                                                (Transformation::SemanticTranslateToTarget, Some(relative_spec))
-                                            }
+                                        // Try SpatialRelation first
+                                        if let Some(spatial_rel) = infer_spatial_relation(node_out, &ref_node) {
+                                            let relation_enum = match spatial_rel.as_str() {
+                                                "Above" => crate::abstraction::program::SpatialRelation::Above,
+                                                "Below" => crate::abstraction::program::SpatialRelation::Below,
+                                                "LeftOf" => crate::abstraction::program::SpatialRelation::LeftOf,
+                                                "RightOf" => crate::abstraction::program::SpatialRelation::RightOf,
+                                                "TouchingNorth" => crate::abstraction::program::SpatialRelation::TouchingTop,
+                                                "TouchingSouth" => crate::abstraction::program::SpatialRelation::TouchingBottom,
+                                                "TouchingWest" => crate::abstraction::program::SpatialRelation::TouchingLeft,
+                                                "TouchingEast" => crate::abstraction::program::SpatialRelation::TouchingRight,
+                                                "AlignTop" | "AlignBottom" | "AlignLeft" | "AlignRight" => {
+                                                    if spatial_rel.contains("AlignTop") || spatial_rel.contains("AlignBottom") {
+                                                        crate::abstraction::program::SpatialRelation::CenteredX
+                                                    } else {
+                                                        crate::abstraction::program::SpatialRelation::CenteredY
+                                                    }
+                                                }
+                                                _ => continue,
+                                            };
+                                            let spec = TargetSpec::RelativeToNode {
+                                                condition: Box::new(Condition::Predicate(ref_pred)),
+                                                relation: relation_enum,
+                                            };
+                                            (Transformation::SemanticTranslateToTarget, Some(spec))
                                         } else {
-                                            (Transformation::SemanticTranslateToTarget, Some(relative_spec))
+                                            // Fallback: try Gravitate detection
+                                            let gravitate_dx = ax - ref_x;
+                                            let gravitate_dy = ay - ref_y;
+                                            let is_gravitate = (gravitate_dx == 0 && gravitate_dy != 0) || (gravitate_dy == 0 && gravitate_dx != 0);
+                                            if is_gravitate {
+                                                let touching = (ax + node_out.attributes.get("bbox_w").and_then(|v| v.parse::<i64>().ok()).unwrap_or(0) == ref_x)
+                                                    || (ax == ref_x + ref_node.attributes.get("bbox_w").and_then(|v| v.parse::<i64>().ok()).unwrap_or(0))
+                                                    || (ay + node_out.attributes.get("bbox_h").and_then(|v| v.parse::<i64>().ok()).unwrap_or(0) == ref_y)
+                                                    || (ay == ref_y + ref_node.attributes.get("bbox_h").and_then(|v| v.parse::<i64>().ok()).unwrap_or(0));
+                                                if touching {
+                                                    let gravitate_spec = TargetSpec::GravitateAnchor {
+                                                        anchor_predicate: Box::new(Condition::Predicate(ref_pred_clone)),
+                                                    };
+                                                    (Transformation::SemanticGravitate, Some(gravitate_spec))
+                                                } else {
+                                                    continue
+                                                }
+                                            } else {
+                                                continue
+                                            }
                                         }
                                     } else {
                                         continue
