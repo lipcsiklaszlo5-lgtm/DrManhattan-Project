@@ -63,9 +63,26 @@ impl std::fmt::Debug for AbstractStep {
     }
 }
 
+/// Symbolic spatial relation between two bounding boxes.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SpatialRelation {
+    Above,
+    Below,
+    LeftOf,
+    RightOf,
+    TouchingTop,
+    TouchingBottom,
+    TouchingLeft,
+    TouchingRight,
+    CenteredX,
+    CenteredY,
+    SameRow,
+    SameColumn,
+}
+
 pub enum TargetSpec {
     Constant(String),
-    RelativeToNode { condition: Box<Condition>, dx_offset: i64, dy_offset: i64 },
+    RelativeToNode { condition: Box<Condition>, relation: SpatialRelation },
     GridAnchor { corner: GridCorner },
     CopyAttributeFrom { condition: Box<Condition>, attribute: String },
     GravitateAnchor { anchor_predicate: Box<dyn Predicate> },
@@ -76,9 +93,9 @@ impl PartialEq for TargetSpec {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (TargetSpec::Constant(a), TargetSpec::Constant(b)) => a == b,
-            (TargetSpec::RelativeToNode { condition: c1, dx_offset: dx1, dy_offset: dy1 },
-             TargetSpec::RelativeToNode { condition: c2, dx_offset: dx2, dy_offset: dy2 }) =>
-                c1 == c2 && dx1 == dx2 && dy1 == dy2,
+            (TargetSpec::RelativeToNode { condition: c1, relation: r1 },
+             TargetSpec::RelativeToNode { condition: c2, relation: r2 }) =>
+                c1 == c2 && r1 == r2,
             (TargetSpec::GridAnchor { corner: c1 }, TargetSpec::GridAnchor { corner: c2 }) => c1 == c2,
             (TargetSpec::CopyAttributeFrom { condition: c1, attribute: a1 },
              TargetSpec::CopyAttributeFrom { condition: c2, attribute: a2 }) => c1 == c2 && a1 == a2,
@@ -93,8 +110,8 @@ impl std::fmt::Debug for TargetSpec {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             TargetSpec::Constant(v) => write!(f, "Constant({})", v),
-            TargetSpec::RelativeToNode { condition, dx_offset, dy_offset } =>
-                write!(f, "RelativeToNode({}, {}, {})", condition.name(), dx_offset, dy_offset),
+            TargetSpec::RelativeToNode { condition, relation } =>
+                write!(f, "RelativeToNode({}, {:?})", condition.name(), relation),
             TargetSpec::GridAnchor { corner } => write!(f, "GridAnchor({:?})", corner),
             TargetSpec::CopyAttributeFrom { condition, attribute } =>
                 write!(f, "CopyAttributeFrom({}, {})", condition.name(), attribute),
@@ -108,8 +125,8 @@ impl Clone for TargetSpec {
     fn clone(&self) -> Self {
         match self {
             TargetSpec::Constant(v) => TargetSpec::Constant(v.clone()),
-            TargetSpec::RelativeToNode { condition, dx_offset, dy_offset } =>
-                TargetSpec::RelativeToNode { condition: condition.clone(), dx_offset: *dx_offset, dy_offset: *dy_offset },
+            TargetSpec::RelativeToNode { condition, relation } =>
+                TargetSpec::RelativeToNode { condition: condition.clone(), relation: relation.clone() },
             TargetSpec::GridAnchor { corner } => TargetSpec::GridAnchor { corner: corner.clone() },
             TargetSpec::CopyAttributeFrom { condition, attribute } =>
                 TargetSpec::CopyAttributeFrom { condition: condition.clone(), attribute: attribute.clone() },
@@ -200,12 +217,30 @@ impl GeneralizedProgram {
                 if let Ok(v) = val.parse::<i64>() { Some((v, 0, Some(val.clone()))) }
                 else { Some((0, 0, Some(val.clone()))) }
             }
-            TargetSpec::RelativeToNode { condition, dx_offset, dy_offset } => {
+            TargetSpec::RelativeToNode { condition, relation } => {
                 let refs = Self::matching_nodes(graph, condition.as_ref());
                 if let Some(ref_node) = refs.first() {
                     let rx: i64 = ref_node.attributes.get("bbox_x").and_then(|v| v.parse().ok()).unwrap_or(0);
                     let ry: i64 = ref_node.attributes.get("bbox_y").and_then(|v| v.parse().ok()).unwrap_or(0);
-                    Some((rx + dx_offset, ry + dy_offset, None))
+                    let rw: i64 = ref_node.attributes.get("bbox_w").and_then(|v| v.parse().ok()).unwrap_or(0);
+                    let rh: i64 = ref_node.attributes.get("bbox_h").and_then(|v| v.parse().ok()).unwrap_or(0);
+                    // A mozgó objektum méretét a hívó oldalon (apply_step) ismerjük,
+                    // itt csak a horgony alapján számolunk.
+                    let (tx, ty) = match relation {
+                        SpatialRelation::Above => (rx + rw/2, ry),
+                        SpatialRelation::Below => (rx + rw/2, ry + rh),
+                        SpatialRelation::LeftOf => (rx, ry + rh/2),
+                        SpatialRelation::RightOf => (rx + rw, ry + rh/2),
+                        SpatialRelation::TouchingTop => (rx + rw/2, ry),
+                        SpatialRelation::TouchingBottom => (rx + rw/2, ry + rh),
+                        SpatialRelation::TouchingLeft => (rx, ry + rh/2),
+                        SpatialRelation::TouchingRight => (rx + rw, ry + rh/2),
+                        SpatialRelation::CenteredX => (rx + rw/2, ry + rh/2),
+                        SpatialRelation::CenteredY => (rx + rw/2, ry + rh/2),
+                        SpatialRelation::SameRow => (rx, ry),
+                        SpatialRelation::SameColumn => (rx, ry),
+                    };
+                    Some((tx, ty, None))
                 } else { None }
             }
             TargetSpec::GridAnchor { corner } => {
