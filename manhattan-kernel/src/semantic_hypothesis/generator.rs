@@ -6,6 +6,7 @@ use super::hypothesis::{SemanticStep};
 use crate::object_selector::ObjectSelector;
 use crate::predicate::Predicate;
 use crate::abstraction::program::{TargetSpec, GridCorner};
+use crate::abstraction::transform::Condition;
 use std::collections::HashMap as StdHashMap;
 
 /// Ha a node vegso (output-beli) pozicioja PONTOSAN a racs valamelyik

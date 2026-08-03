@@ -3,7 +3,6 @@ use crate::predicate::{Predicate, PredicateResult};
 use crate::predicate::builtin::ColorPredicate;
 use crate::structure::KernelStructureGraph;
 
-#[derive(Clone)]
 pub enum Condition {
     AlwaysTrue,
     NodeHasAttribute(String, String),
@@ -17,6 +16,26 @@ pub enum Condition {
     Not(Box<Condition>),
     StructuralRole(u64),
     Predicate(Box<dyn Predicate>),
+}
+
+
+impl Clone for Condition {
+    fn clone(&self) -> Self {
+        match self {
+            Condition::AlwaysTrue => Condition::AlwaysTrue,
+            Condition::NodeHasAttribute(a, v) => Condition::NodeHasAttribute(a.clone(), v.clone()),
+            Condition::ColorEquals(c) => Condition::ColorEquals(c.clone()),
+            Condition::PositionAbove(id) => Condition::PositionAbove(id.clone()),
+            Condition::PositionLeftOf(id) => Condition::PositionLeftOf(id.clone()),
+            Condition::Unique(s) => Condition::Unique(s.clone()),
+            Condition::ExtremeByAttribute { attribute, mode } => Condition::ExtremeByAttribute { attribute: attribute.clone(), mode: mode.clone() },
+            Condition::TouchesBorder => Condition::TouchesBorder,
+            Condition::And(conds) => Condition::And(conds.clone()),
+            Condition::Not(cond) => Condition::Not(cond.clone()),
+            Condition::StructuralRole(r) => Condition::StructuralRole(*r),
+            Condition::Predicate(p) => Condition::Predicate(p.clone_box()),
+        }
+    }
 }
 
 impl std::fmt::Debug for Condition {
