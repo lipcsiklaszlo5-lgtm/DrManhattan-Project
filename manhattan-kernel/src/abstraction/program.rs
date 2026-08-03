@@ -113,6 +113,38 @@ impl PartialEq for TargetSpec {
     }
 }
 
+impl std::fmt::Debug for TargetSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TargetSpec::Constant(v) => write!(f, "Constant({})", v),
+            TargetSpec::RelativeToNode { condition, dx_offset, dy_offset } =>
+                write!(f, "RelativeToNode({}, {}, {})", condition.name(), dx_offset, dy_offset),
+            TargetSpec::GridAnchor { corner } => write!(f, "GridAnchor({:?})", corner),
+            TargetSpec::CopyAttributeFrom { condition, attribute } =>
+                write!(f, "CopyAttributeFrom({}, {})", condition.name(), attribute),
+            TargetSpec::SemanticRelation { relation, anchor_predicate } =>
+                write!(f, "SemanticRelation({:?}, {})", relation, anchor_predicate.name()),
+        }
+    }
+}
+
+
+impl Clone for TargetSpec {
+    fn clone(&self) -> Self {
+        match self {
+            TargetSpec::Constant(v) => TargetSpec::Constant(v.clone()),
+            TargetSpec::RelativeToNode { condition, dx_offset, dy_offset } =>
+                TargetSpec::RelativeToNode { condition: condition.clone(), dx_offset: *dx_offset, dy_offset: *dy_offset },
+            TargetSpec::GridAnchor { corner } => TargetSpec::GridAnchor { corner: corner.clone() },
+            TargetSpec::CopyAttributeFrom { condition, attribute } =>
+                TargetSpec::CopyAttributeFrom { condition: condition.clone(), attribute: attribute.clone() },
+            TargetSpec::SemanticRelation { relation, anchor_predicate } =>
+                TargetSpec::SemanticRelation { relation: relation.clone(), anchor_predicate: anchor_predicate.clone_box() },
+        }
+    }
+}
+
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum GridCorner { TopLeft, TopRight, BottomLeft, BottomRight }
 
