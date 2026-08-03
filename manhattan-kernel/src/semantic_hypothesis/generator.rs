@@ -312,9 +312,9 @@ fn step_signature(step: &SemanticStep) -> (String, Vec<String>, String) {
         None => "None".to_string(),
         Some(TargetSpec::Constant(_)) => "Constant".to_string(),
         Some(TargetSpec::GridAnchor { corner }) => format!("GridAnchor:{:?}", corner),
-        Some(TargetSpec::RelativeToNode { condition, dx_offset: _, dy_offset: _ }) => {
-            // Ha van felismert reláció, azt használjuk a szignatúrában
-            format!("RelativeToNode:{}", condition.name())
+        Some(TargetSpec::RelativeToNode { condition, relation }) => {
+            // Használjuk a felismert térbeli relációt
+            format!("RelativeToNode:{}:{:?}", condition.name(), relation)
         }
         Some(TargetSpec::CopyAttributeFrom { .. }) => "CopyAttributeFrom".to_string(),
         Some(TargetSpec::GravitateAnchor { anchor_predicate }) => format!("GravitateAnchor:{}", anchor_predicate.name()),
