@@ -109,43 +109,36 @@ pub fn generate_candidate_steps(
                                                 predicates: ref_preds.iter().map(|p| p.clone_box()).collect(),
                                             })
                                         };
-                                        let _condition = Condition::Predicate(ref_pred.clone_box());
-                                        // Infer semantic relation if possible
-                                        let relation = infer_spatial_relation(node_out, &ref_node);
-                                        let target_spec = if let Some(_rel_name) = relation {
-                                            // Use the relation as part of the target_kind in step_signature
-                                            TargetSpec::RelativeToNode {
-                                                condition: Box::new(Condition::Predicate(ref_pred)),
-                                                dx_offset: rel_dx,
-                                                dy_offset: rel_dy,
-                                            }
-                                        } else {
-                                            TargetSpec::RelativeToNode {
-                                                condition: Box::new(Condition::Predicate(ref_pred)),
-                                                dx_offset: rel_dx,
-                                                dy_offset: rel_dy,
-                                            }
+
+                                        // Clone ref_pred for multiple uses
+                                        let ref_pred_clone = ref_pred.clone_box();
+
+                                        // 1. Create RelativeToNode step
+                                        let relative_spec = TargetSpec::RelativeToNode {
+                                            condition: Box::new(Condition::Predicate(ref_pred)),
+                                            dx_offset: rel_dx,
+                                            dy_offset: rel_dy,
                                         };
-                                        // Try Gravitate detection: if the movement is a pure axis-aligned slide to touch
+
+                                        // 2. Try Gravitate detection
                                         let gravitate_dx = ax - ref_x;
                                         let gravitate_dy = ay - ref_y;
                                         let is_gravitate = (gravitate_dx == 0 && gravitate_dy != 0) || (gravitate_dy == 0 && gravitate_dx != 0);
                                         if is_gravitate {
-                                            // Check if the final position touches the reference
                                             let touching = (ax + node_out.attributes.get("bbox_w").and_then(|v| v.parse::<i64>().ok()).unwrap_or(0) == ref_x)
                                                 || (ax == ref_x + ref_node.attributes.get("bbox_w").and_then(|v| v.parse::<i64>().ok()).unwrap_or(0))
                                                 || (ay + node_out.attributes.get("bbox_h").and_then(|v| v.parse::<i64>().ok()).unwrap_or(0) == ref_y)
                                                 || (ay == ref_y + ref_node.attributes.get("bbox_h").and_then(|v| v.parse::<i64>().ok()).unwrap_or(0));
                                             if touching {
                                                 let gravitate_spec = TargetSpec::GravitateAnchor {
-                                                    anchor_predicate: Box::new(Condition::Predicate(ref_pred.clone_box())),
+                                                    anchor_predicate: Box::new(Condition::Predicate(ref_pred_clone)),
                                                 };
                                                 (Transformation::SemanticGravitate, Some(gravitate_spec))
                                             } else {
-                                                (Transformation::SemanticTranslateToTarget, Some(target_spec))
+                                                (Transformation::SemanticTranslateToTarget, Some(relative_spec))
                                             }
                                         } else {
-                                            (Transformation::SemanticTranslateToTarget, Some(target_spec))
+                                            (Transformation::SemanticTranslateToTarget, Some(relative_spec))
                                         }
                                     } else {
                                         continue
