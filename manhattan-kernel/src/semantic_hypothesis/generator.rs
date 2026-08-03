@@ -90,49 +90,61 @@ pub fn generate_candidate_steps(
                         match grid_anchor_for_node(node_out, grid_width, grid_height) {
                             Some(spec) => (Transformation::SemanticTranslateToTarget, Some(spec)),
                             None => {
-                                // Próbáljunk relatív célpontot generálni egy referencia objektumhoz képest
-                                if let Some(ref_node) = input.nodes.iter()
-                                    .filter(|n| n.id != *node_id)
-                                    .max_by_key(|n| n.attributes.get("area").and_then(|v| v.parse::<u64>().ok()).unwrap_or(0))
-                                {
-                                    if let Some(ref_preds) = describe_node_all(&ref_node.id, input).into_iter().next() {
-                                        let ref_x: i64 = ref_node.attributes.get("bbox_x").and_then(|v| v.parse().ok()).unwrap_or(0);
-                                        let ref_y: i64 = ref_node.attributes.get("bbox_y").and_then(|v| v.parse().ok()).unwrap_or(0);
-                                        let ax: i64 = node_out.attributes.get("bbox_x").and_then(|v| v.parse().ok()).unwrap_or(0);
-                                        let ay: i64 = node_out.attributes.get("bbox_y").and_then(|v| v.parse().ok()).unwrap_or(0);
-                                        let rel_dx = ax - ref_x;
-                                        let rel_dy = ay - ref_y;
-                                        let ref_pred: Box<dyn Predicate> = if ref_preds.len() == 1 {
-                                            ref_preds[0].clone_box()
-                                        } else {
-                                            Box::new(crate::predicate::builtin::AndPredicate {
-                                                predicates: ref_preds.iter().map(|p| p.clone_box()).collect(),
-                                            })
-                                        };
-                                        let condition = Condition::Predicate(ref_pred.clone_box());
-                                        // Infer semantic relation if possible
-                                        let relation = infer_spatial_relation(node_out, &ref_node);
-                                        let target_spec = if let Some(rel_name) = relation {
-                                            // Use the relation as part of the target_kind in step_signature
-                                            TargetSpec::RelativeToNode {
-                                                condition: Box::new(Condition::Predicate(ref_pred)),
-                                                dx_offset: rel_dx,
-                                                dy_offset: rel_dy,
+                                // Több referenciaobjektum-hipotézis generálása:
+                                // Largest, Smallest, Leftmost, Rightmost, Topmost, Bottommost,
+                                // MajorityColor, MinorityColor, UniqueColor, CenterObject
+                                let ref_predicates: Vec<Box<dyn Predicate>> = vec![
+                                    Box::new(crate::predicate::builtin::LargestPredicate),
+                                    Box::new(crate::predicate::builtin::SmallestPredicate),
+                                    Box::new(crate::predicate::builtin::LeftmostPredicate),
+                                    Box::new(crate::predicate::builtin::RightmostPredicate),
+                                    Box::new(crate::predicate::builtin::TopmostPredicate),
+                                    Box::new(crate::predicate::builtin::BottommostPredicate),
+                                    Box::new(crate::predicate::builtin::MajorityColorPredicate),
+                                    Box::new(crate::predicate::builtin::MinorityColorPredicate),
+                                    Box::new(crate::predicate::builtin::UniqueColorPredicate),
+                                ];
+                                for ref_predicate in ref_predicates {
+                                    // Keressük meg a referenciaobjektumot ezzel a predikátummal
+                                    let result = ObjectSelector::select(
+                                        ref_predicate.as_ref(),
+                                        input,
+                                        &crate::object_selector::SelectionStrategy::Best,
+                                        None,
+                                    );
+                                    if let Some(ref_node) = result.selected.first() {
+                                        if let Some(ref_node) = input.nodes.iter().find(|n| n.id == ref_node.node_id) {
+                                            if ref_node.id != *node_id {
+                                                if let Some(ref_preds) = describe_node_all(&ref_node.id, input).into_iter().next() {
+                                                    let ref_x: i64 = ref_node.attributes.get("bbox_x").and_then(|v| v.parse().ok()).unwrap_or(0);
+                                                    let ref_y: i64 = ref_node.attributes.get("bbox_y").and_then(|v| v.parse().ok()).unwrap_or(0);
+                                                    let ax: i64 = node_out.attributes.get("bbox_x").and_then(|v| v.parse().ok()).unwrap_or(0);
+                                                    let ay: i64 = node_out.attributes.get("bbox_y").and_then(|v| v.parse().ok()).unwrap_or(0);
+                                                    let rel_dx = ax - ref_x;
+                                                    let rel_dy = ay - ref_y;
+                                                    let ref_pred: Box<dyn Predicate> = if ref_preds.len() == 1 {
+                                                        ref_preds[0].clone_box()
+                                                    } else {
+                                                        Box::new(crate::predicate::builtin::AndPredicate {
+                                                            predicates: ref_preds.iter().map(|p| p.clone_box()).collect(),
+                                                        })
+                                                    };
+                                                    let condition = Condition::Predicate(ref_pred);
+                                                    let target_spec = TargetSpec::RelativeToNode {
+                                                        condition: Box::new(condition),
+                                                        dx_offset: rel_dx,
+                                                        dy_offset: rel_dy,
+                                                    };
+                                                    // Ezt a lépést később hozzáadjuk a steps-hez
+                                                    // Először csak a (Transformation, TargetSpec) párt tároljuk
+                                                    // Ezt a blokkot a hívó oldalon kell kezelni
+                                                }
                                             }
-                                        } else {
-                                            TargetSpec::RelativeToNode {
-                                                condition: Box::new(Condition::Predicate(ref_pred)),
-                                                dx_offset: rel_dx,
-                                                dy_offset: rel_dy,
-                                            }
-                                        };
-                                        (Transformation::SemanticTranslateToTarget, Some(target_spec))
-                                    } else {
-                                        continue
+                                        }
                                     }
-                                } else {
-                                    continue
                                 }
+                                // Ha egyetlen referenciaobjektumot sem találtunk, folytatjuk a következő diff-fel
+                                continue;
                             }
                         }
                     }
