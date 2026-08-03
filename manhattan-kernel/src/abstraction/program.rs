@@ -63,13 +63,60 @@ impl std::fmt::Debug for AbstractStep {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
 pub enum TargetSpec {
     Constant(String),
     RelativeToNode { condition: Box<Condition>, dx_offset: i64, dy_offset: i64 },
     GridAnchor { corner: GridCorner },
     CopyAttributeFrom { condition: Box<Condition>, attribute: String },
     GravitateAnchor { anchor_predicate: Box<dyn Predicate> },
+}
+
+
+impl PartialEq for TargetSpec {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (TargetSpec::Constant(a), TargetSpec::Constant(b)) => a == b,
+            (TargetSpec::RelativeToNode { condition: c1, dx_offset: dx1, dy_offset: dy1 },
+             TargetSpec::RelativeToNode { condition: c2, dx_offset: dx2, dy_offset: dy2 }) =>
+                c1 == c2 && dx1 == dx2 && dy1 == dy2,
+            (TargetSpec::GridAnchor { corner: c1 }, TargetSpec::GridAnchor { corner: c2 }) => c1 == c2,
+            (TargetSpec::CopyAttributeFrom { condition: c1, attribute: a1 },
+             TargetSpec::CopyAttributeFrom { condition: c2, attribute: a2 }) => c1 == c2 && a1 == a2,
+            (TargetSpec::GravitateAnchor { anchor_predicate: p1 },
+             TargetSpec::GravitateAnchor { anchor_predicate: p2 }) => p1.name() == p2.name(),
+            _ => false,
+        }
+    }
+}
+
+impl std::fmt::Debug for TargetSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TargetSpec::Constant(v) => write!(f, "Constant({})", v),
+            TargetSpec::RelativeToNode { condition, dx_offset, dy_offset } =>
+                write!(f, "RelativeToNode({}, {}, {})", condition.name(), dx_offset, dy_offset),
+            TargetSpec::GridAnchor { corner } => write!(f, "GridAnchor({:?})", corner),
+            TargetSpec::CopyAttributeFrom { condition, attribute } =>
+                write!(f, "CopyAttributeFrom({}, {})", condition.name(), attribute),
+            TargetSpec::GravitateAnchor { anchor_predicate } =>
+                write!(f, "GravitateAnchor({})", anchor_predicate.name()),
+        }
+    }
+}
+
+impl Clone for TargetSpec {
+    fn clone(&self) -> Self {
+        match self {
+            TargetSpec::Constant(v) => TargetSpec::Constant(v.clone()),
+            TargetSpec::RelativeToNode { condition, dx_offset, dy_offset } =>
+                TargetSpec::RelativeToNode { condition: condition.clone(), dx_offset: *dx_offset, dy_offset: *dy_offset },
+            TargetSpec::GridAnchor { corner } => TargetSpec::GridAnchor { corner: corner.clone() },
+            TargetSpec::CopyAttributeFrom { condition, attribute } =>
+                TargetSpec::CopyAttributeFrom { condition: condition.clone(), attribute: attribute.clone() },
+            TargetSpec::GravitateAnchor { anchor_predicate } =>
+                TargetSpec::GravitateAnchor { anchor_predicate: anchor_predicate.clone_box() },
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -189,41 +236,7 @@ impl GeneralizedProgram {
         }
     }
 
-
-fn gravitate(moving: &crate::structure::Node, anchor: &crate::structure::Node) -> (i64, i64) {
-    let mx: i64 = moving.attributes.get("bbox_x").and_then(|v| v.parse().ok()).unwrap_or(0);
-    let my: i64 = moving.attributes.get("bbox_y").and_then(|v| v.parse().ok()).unwrap_or(0);
-    let mw: i64 = moving.attributes.get("bbox_w").and_then(|v| v.parse().ok()).unwrap_or(1);
-    let mh: i64 = moving.attributes.get("bbox_h").and_then(|v| v.parse().ok()).unwrap_or(1);
-    let ax: i64 = anchor.attributes.get("bbox_x").and_then(|v| v.parse().ok()).unwrap_or(0);
-    let ay: i64 = anchor.attributes.get("bbox_y").and_then(|v| v.parse().ok()).unwrap_or(0);
-    let aw: i64 = anchor.attributes.get("bbox_w").and_then(|v| v.parse().ok()).unwrap_or(1);
-    let ah: i64 = anchor.attributes.get("bbox_h").and_then(|v| v.parse().ok()).unwrap_or(1);
-
-    let col_overlap = mx < ax + aw && mx + mw > ax;
-    let row_overlap = my < ay + ah && my + mh > ay;
-
-    if col_overlap && !row_overlap {
-        let dy = if my + mh <= ay {
-            ay - (my + mh)
-        } else {
-            ay + ah - my
-        };
-        (0, dy)
-    } else if row_overlap && !col_overlap {
-        let dx = if mx + mw <= ax {
-            ax - (mx + mw)
-        } else {
-            ax + aw - mx
-        };
-        (dx, 0)
-    } else {
-        (0, 0)
-    }
-}
-
     fn apply_step(graph: &KernelStructureGraph, step: &AbstractStep, gw: u8, gh: u8) -> KernelStructureGraph {
-
         let candidates: Vec<crate::structure::Node> = match Self::select_candidates(graph, step) {
             Some(nodes) => nodes.into_iter().cloned().collect(),
             None => Vec::new(), // Cardinality::ExactlyOne, de ambiguity/0 talalat -> nincs vegrehajtas
@@ -281,21 +294,6 @@ fn gravitate(moving: &crate::structure::Node, anchor: &crate::structure::Node) -
                             let dy = ty - oy;
                             let translate = Transformation::Translate { node_id: node.id.clone(), dx, dy };
                             result = crate::sandbox::operators::apply_transformation(&result, &translate);
-                        }
-                    }
-                }
-                Transformation::SemanticGravitate => {
-                    if let Some(spec) = &step.target_spec {
-                        if let Some((ax, ay, _)) = Self::resolve_target_spec(spec, graph, gw, gh) {
-                            if let Some(anchor_node) = graph.nodes.iter().find(|n| {
-                                let nx: i64 = n.attributes.get("bbox_x").and_then(|v| v.parse().ok()).unwrap_or(0);
-                                let ny: i64 = n.attributes.get("bbox_y").and_then(|v| v.parse().ok()).unwrap_or(0);
-                                nx == ax && ny == ay
-                            }) {
-                                let (dx, dy) = gravitate(&node, anchor_node);
-                                let translate = Transformation::Translate { node_id: node.id.clone(), dx, dy };
-                                result = crate::sandbox::operators::apply_transformation(&result, &translate);
-                            }
                         }
                     }
                 }
