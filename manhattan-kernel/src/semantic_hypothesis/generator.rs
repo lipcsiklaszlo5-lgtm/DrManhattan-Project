@@ -108,8 +108,9 @@ pub fn generate_candidate_steps(
                                                 predicates: ref_preds.iter().map(|p| p.clone_box()).collect(),
                                             })
                                         };
-                                        (Transformation::SemanticTranslateToTarget, Some(TargetSpec::RelativeToPredicate {
-                                            predicate: ref_pred,
+                                        let condition = Condition::Predicate(ref_pred);
+                                        (Transformation::SemanticTranslateToTarget, Some(TargetSpec::RelativeToNode {
+                                            condition: Box::new(condition),
                                             dx_offset: rel_dx,
                                             dy_offset: rel_dy,
                                         }))
@@ -183,8 +184,8 @@ fn step_signature(step: &SemanticStep) -> (String, Vec<String>, String) {
         Some(TargetSpec::GridAnchor { corner }) => format!("GridAnchor:{:?}", corner),
         Some(TargetSpec::RelativeToNode { .. }) => "RelativeToNode".to_string(),
         Some(TargetSpec::CopyAttributeFrom { .. }) => "CopyAttributeFrom".to_string(),
-        Some(TargetSpec::RelativeToPredicate { predicate, .. }) => {
-            format!("RelativeToPredicate:{}", predicate.name())
+        Some(TargetSpec::RelativeToNode { condition, dx_offset, dy_offset }) => {
+            format!("RelativeToNode:{}_{}_{}", condition.name(), dx_offset, dy_offset)
         }
     };
     (transformation_shape, cond_names, target_kind)
