@@ -1,0 +1,93 @@
+You are an ARC task solver. Given the training examples and available operators, generate ONE JSON program that transforms the input grid into the output grid.
+
+Grids (input -> output):
+Pair 0:
+0,0,0,0,0,0,0,0,0
+0,0,0,0,0,0,0,0,0
+0,2,2,2,0,0,0,0,0
+2,2,0,2,0,0,0,0,0
+0,0,0,0,0,0,0,0,0
+0,0,0,0,0,0,0,0,0
+0,0,0,0,0,0,0,0,0
+0,0,0,0,0,0,0,0,0
+0,0,0,0,0,0,0,0,0
+0,0,0,0,0,0,0,0,0
+0,0,0,8,8,0,0,0,0
+0,0,0,8,8,0,0,0,0
+0,0,0,0,0,0,0,0,0
+0,0,0,0,0,0,0,0,0
+->
+0,0,0,0,0,0,0,0,0
+0,0,0,0,0,0,0,0,0
+0,0,0,0,0,0,0,0,0
+0,0,0,0,0,0,0,0,0
+0,0,0,0,0,0,0,0,0
+0,0,0,0,0,0,0,0,0
+0,0,0,0,0,0,0,0,0
+0,0,0,0,0,0,0,0,0
+0,2,2,2,0,0,0,0,0
+2,2,0,2,0,0,0,0,0
+0,0,0,8,8,0,0,0,0
+0,0,0,8,8,0,0,0,0
+0,0,0,0,0,0,0,0,0
+0,0,0,0,0,0,0,0,0
+
+Pair 1:
+0,0,0,0,0,0,0,0,0,0
+0,2,2,0,0,0,0,0,0,0
+0,2,2,0,0,0,0,0,0,0
+2,2,2,0,0,0,0,0,0,0
+0,2,2,0,0,0,8,8,0,0
+0,0,0,0,0,0,8,8,0,0
+0,0,0,0,0,0,0,0,0,0
+0,0,0,0,0,0,0,0,0,0
+0,0,0,0,0,0,0,0,0,0
+->
+0,0,0,0,0,0,0,0,0,0
+0,0,0,0,2,2,0,0,0,0
+0,0,0,0,2,2,0,0,0,0
+0,0,0,2,2,2,0,0,0,0
+0,0,0,0,2,2,8,8,0,0
+0,0,0,0,0,0,8,8,0,0
+0,0,0,0,0,0,0,0,0,0
+0,0,0,0,0,0,0,0,0,0
+0,0,0,0,0,0,0,0,0,0
+
+Pair 2:
+0,0,0,0,0,0,0,0,0,0
+0,0,0,8,8,0,0,0,0,0
+0,0,0,8,8,0,0,0,0,0
+0,0,0,0,0,0,0,0,0,0
+0,0,0,0,0,0,0,0,0,0
+0,0,0,0,0,0,0,0,0,0
+0,0,0,2,2,2,0,0,0,0
+0,2,2,2,2,2,0,0,0,0
+0,0,2,2,0,0,0,0,0,0
+0,0,0,0,0,0,0,0,0,0
+0,0,0,0,0,0,0,0,0,0
+->
+0,0,0,0,0,0,0,0,0,0
+0,0,0,8,8,0,0,0,0,0
+0,0,0,8,8,0,0,0,0,0
+0,0,0,2,2,2,0,0,0,0
+0,2,2,2,2,2,0,0,0,0
+0,0,2,2,0,0,0,0,0,0
+0,0,0,0,0,0,0,0,0,0
+0,0,0,0,0,0,0,0,0,0
+0,0,0,0,0,0,0,0,0,0
+0,0,0,0,0,0,0,0,0,0
+0,0,0,0,0,0,0,0,0,0
+
+
+Graph diffs (what changed):
+Pair 0: [Unchanged { node_id: "obj_1" }, Translate { node_id: "obj_0", dx: 0, dy: 6 }]
+Pair 1: [Translate { node_id: "obj_0", dx: 3, dy: 0 }, Unchanged { node_id: "obj_1" }]
+Pair 2: [Unchanged { node_id: "obj_0" }, Translate { node_id: "obj_1", dx: 0, dy: -3 }]
+
+
+Available predicates: Largest, Smallest, Leftmost, Rightmost, Topmost, Bottommost, ColorEquals(N), UniqueColor, MajorityColor, MinorityColor.
+Available transformations: SemanticTranslateToTarget, SemanticRecolorToTarget, SemanticMirrorHorizontal, SemanticMirrorVertical, SemanticGravitate.
+TargetSpec types: RelativeToNode(relation: Above/Below/LeftOf/RightOf/TouchingTop/TouchingBottom/TouchingLeft/TouchingRight/CenteredX/CenteredY), Constant(value), GridAnchor(corner: TopLeft/TopRight/BottomLeft/BottomRight), GravitateAnchor(anchor_predicate).
+Cardinalities: All, ExactlyOne, AtMostOne.
+
+Output ONLY valid JSON (no extra text): {"steps":[{"condition":{"type":"Largest"},"transformation":"SemanticTranslateToTarget","target_spec":{"type":"RelativeToNode","anchor_predicate":{"type":"Smallest"},"relation":"TouchingTop"},"cardinality":"All"}]}

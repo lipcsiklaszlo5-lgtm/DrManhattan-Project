@@ -1,0 +1,34 @@
+[
+  {
+    "comment": "H1: Largest object moves to touch the smallest object on top (pair0 mintája)",
+    "condition": {"type": "Largest"},
+    "transformation": "SemanticTranslateToTarget",
+    "target_spec": {
+      "type": "RelativeToNode",
+      "anchor_predicate": {"type": "Smallest"},
+      "relation": "TouchingTop"
+    },
+    "cardinality": "All"
+  },
+  {
+    "comment": "H2: Largest object moves to touch the smallest object on left (pair1 mintája)",
+    "condition": {"type": "Largest"},
+    "transformation": "SemanticTranslateToTarget",
+    "target_spec": {
+      "type": "RelativeToNode",
+      "anchor_predicate": {"type": "Smallest"},
+      "relation": "TouchingLeft"
+    },
+    "cardinality": "All"
+  },
+  {
+    "comment": "H3: Largest object gravitates toward the smallest object (gravitate primitív)",
+    "condition": {"type": "Largest"},
+    "transformation": "SemanticGravitate",
+    "target_spec": {
+      "type": "GravitateAnchor",
+      "anchor_predicate": {"type": "Smallest"}
+    },
+    "cardinality": "All"
+  }
+]

@@ -1,0 +1,20 @@
+{
+  "steps": [
+    {
+      "condition": {
+        "type": "ColorEquals",
+        "color": 2
+      },
+      "transformation": "SemanticTranslateToTarget",
+      "target_spec": {
+        "type": "RelativeToNode",
+        "anchor_predicate": {
+          "type": "ColorEquals",
+          "color": 8
+        },
+        "relation": "TouchingTop"
+      },
+      "cardinality": "All"
+    }
+  ]
+}
