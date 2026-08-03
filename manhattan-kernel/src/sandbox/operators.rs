@@ -17,6 +17,7 @@ pub enum Transformation {
     SemanticMirrorVertical,
     SemanticTranslateToTarget,
     SemanticRecolorToTarget,
+    SemanticGravitate,
     MirrorHorizontal { node_id: String },
     MirrorVertical { node_id: String },
     Rotate { node_id: String, angle: u16 },
@@ -183,7 +184,8 @@ pub fn apply_transformation(graph: &KernelStructureGraph, transform: &Transforma
         Transformation::SemanticMirrorHorizontal
         | Transformation::SemanticMirrorVertical
         | Transformation::SemanticTranslateToTarget
-        | Transformation::SemanticRecolorToTarget => {
+        | Transformation::SemanticRecolorToTarget
+        | Transformation::SemanticGravitate => {
             // These are handled by GeneralizedProgram::apply_step with selected node IDs
         }
     }
