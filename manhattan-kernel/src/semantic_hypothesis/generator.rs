@@ -283,7 +283,7 @@ fn step_signature(step: &SemanticStep) -> (String, Vec<String>, String) {
             // Ha van felismert reláció, azt használjuk a szignatúrában
             format!("RelativeToNode:{}", condition.name())
         }
-        Some(TargetSpec::CopyAttributeFrom { .. }) => "CopyAttributeFrom".to_string()
+        Some(TargetSpec::CopyAttributeFrom { .. }), => "CopyAttributeFrom".to_string()
     };
     (transformation_shape, cond_names, target_kind)
 }
