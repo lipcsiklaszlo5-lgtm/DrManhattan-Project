@@ -109,12 +109,24 @@ pub fn generate_candidate_steps(
                                                 predicates: ref_preds.iter().map(|p| p.clone_box()).collect(),
                                             })
                                         };
-                                        let condition = Condition::Predicate(ref_pred);
-                                        (Transformation::SemanticTranslateToTarget, Some(TargetSpec::RelativeToNode {
-                                            condition: Box::new(condition),
-                                            dx_offset: rel_dx,
-                                            dy_offset: rel_dy,
-                                        }))
+                                        let condition = Condition::Predicate(ref_pred.clone_box());
+                                        // Infer semantic relation if possible
+                                        let relation = infer_spatial_relation(node_out, &ref_node);
+                                        let target_spec = if let Some(rel_name) = relation {
+                                            // Use the relation as part of the target_kind in step_signature
+                                            TargetSpec::RelativeToNode {
+                                                condition: Box::new(Condition::Predicate(ref_pred)),
+                                                dx_offset: rel_dx,
+                                                dy_offset: rel_dy,
+                                            }
+                                        } else {
+                                            TargetSpec::RelativeToNode {
+                                                condition: Box::new(Condition::Predicate(ref_pred)),
+                                                dx_offset: rel_dx,
+                                                dy_offset: rel_dy,
+                                            }
+                                        };
+                                        (Transformation::SemanticTranslateToTarget, Some(target_spec))
                                     } else {
                                         continue
                                     }
@@ -173,6 +185,90 @@ fn abstract_translate(
 /// SemanticTranslateToTarget lepes csak akkor szamit "ugyanannak", ha
 /// mindketto pl. GridAnchor tipusu -- egy GridAnchor es egy semmilyen
 /// target_spec nelkuli lepes nem keveredik ossze.
+
+/// Infer a spatial relation between a moved object and its reference.
+/// Returns the relation name if the bbox alignment is unambiguous.
+fn infer_spatial_relation(
+    node: &crate::structure::Node,
+    ref_node: &crate::structure::Node,
+) -> Option<String> {
+    let nx: i64 = node.attributes.get("bbox_x").and_then(|v| v.parse().ok())?;
+    let ny: i64 = node.attributes.get("bbox_y").and_then(|v| v.parse().ok())?;
+    let nw: i64 = node.attributes.get("bbox_w").and_then(|v| v.parse().ok())?;
+    let nh: i64 = node.attributes.get("bbox_h").and_then(|v| v.parse().ok())?;
+    let rx: i64 = ref_node.attributes.get("bbox_x").and_then(|v| v.parse().ok())?;
+    let ry: i64 = ref_node.attributes.get("bbox_y").and_then(|v| v.parse().ok())?;
+    let rw: i64 = ref_node.attributes.get("bbox_w").and_then(|v| v.parse().ok())?;
+    let rh: i64 = ref_node.attributes.get("bbox_h").and_then(|v| v.parse().ok())?;
+
+    let tol = 1i64; // pixel tolerance
+
+    // Vertical relations
+    let node_bottom = ny + nh;
+    let node_top = ny;
+    let ref_bottom = ry + rh;
+    let ref_top = ry;
+    let node_center_x = nx + nw/2;
+    let ref_center_x = rx + rw/2;
+    let h_aligned = (node_center_x - ref_center_x).abs() <= tol;
+
+    if node_bottom <= ref_top && h_aligned {
+        return Some("Above".to_string());
+    }
+    if node_top >= ref_bottom && h_aligned {
+        return Some("Below".to_string());
+    }
+    if node_bottom == ref_top {
+        return Some("TouchingNorth".to_string());
+    }
+    if node_top == ref_bottom {
+        return Some("TouchingSouth".to_string());
+    }
+
+    // Horizontal relations
+    let node_right = nx + nw;
+    let node_left = nx;
+    let ref_right = rx + rw;
+    let ref_left = rx;
+    let node_center_y = ny + nh/2;
+    let ref_center_y = ry + rh/2;
+    let v_aligned = (node_center_y - ref_center_y).abs() <= tol;
+
+    if node_right <= ref_left && v_aligned {
+        return Some("LeftOf".to_string());
+    }
+    if node_left >= ref_right && v_aligned {
+        return Some("RightOf".to_string());
+    }
+    if node_right == ref_left {
+        return Some("TouchingWest".to_string());
+    }
+    if node_left == ref_right {
+        return Some("TouchingEast".to_string());
+    }
+
+    // Alignment relations
+    if node_top == ref_top && h_aligned {
+        return Some("AlignTop".to_string());
+    }
+    if node_bottom == ref_bottom && h_aligned {
+        return Some("AlignBottom".to_string());
+    }
+    if node_left == ref_left && v_aligned {
+        return Some("AlignLeft".to_string());
+    }
+    if node_right == ref_right && v_aligned {
+        return Some("AlignRight".to_string());
+    }
+
+    // Center inside
+    if nx >= rx && ny >= ry && (nx + nw) <= (rx + rw) && (ny + nh) <= (ry + rh) {
+        return Some("CenterInside".to_string());
+    }
+
+    None
+}
+
 fn step_signature(step: &SemanticStep) -> (String, Vec<String>, String) {
     let transformation_shape = format!("{:?}", step.transformation);
     let mut cond_names: Vec<String> = step.condition.as_ref()
@@ -183,11 +279,11 @@ fn step_signature(step: &SemanticStep) -> (String, Vec<String>, String) {
         None => "None".to_string(),
         Some(TargetSpec::Constant(_)) => "Constant".to_string(),
         Some(TargetSpec::GridAnchor { corner }) => format!("GridAnchor:{:?}", corner),
-        Some(TargetSpec::RelativeToNode { .. }) => "RelativeToNode".to_string(),
-        Some(TargetSpec::CopyAttributeFrom { .. }) => "CopyAttributeFrom".to_string(),
-        Some(TargetSpec::RelativeToNode { condition, dx_offset, dy_offset }) => {
-            format!("RelativeToNode:{}_{}_{}", condition.name(), dx_offset, dy_offset)
+        Some(TargetSpec::RelativeToNode { condition, dx_offset: _, dy_offset: _ }) => {
+            // Ha van felismert reláció, azt használjuk a szignatúrában
+            format!("RelativeToNode:{}", condition.name())
         }
+        Some(TargetSpec::CopyAttributeFrom { .. }) => "CopyAttributeFrom".to_string()
     };
     (transformation_shape, cond_names, target_kind)
 }
