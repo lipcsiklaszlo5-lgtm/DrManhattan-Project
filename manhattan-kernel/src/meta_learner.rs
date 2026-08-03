@@ -152,15 +152,13 @@ impl MetaLearner {
         // Új: közös lépések generálása az összes train párból
         let common_steps = crate::semantic_hypothesis::generator::generate_common_steps(&ksg_pairs);
 
-        // A generate_common_steps már validálta a lépéseket, itt csak átvesszük őket
-        let validated_steps = common_steps;
-
-        // Convert validated steps to GeneralizedProgram
-        if !validated_steps.is_empty() {
-            let abstract_steps: Vec<crate::abstraction::program::AbstractStep> = validated_steps.into_iter().map(|s| {
+        // Minden közös lépésből külön programot készítünk,
+        // hogy a coverage teszt a legjobbat választhassa ki.
+        for step in common_steps {
+            let abstract_step = {
                 use crate::abstraction::program::{AbstractStep, Cardinality};
                 AbstractStep {
-                    condition: s.condition.map(|preds| {
+                    condition: step.condition.map(|preds| {
                         if preds.len() == 1 {
                             preds[0].clone_box()
                         } else {
@@ -169,12 +167,16 @@ impl MetaLearner {
                             })
                         }
                     }),
-                    transformation: s.transformation,
-                    target_spec: s.target_spec,
+                    transformation: step.transformation,
+                    target_spec: step.target_spec,
                     cardinality: Cardinality::All,
                 }
-            }).collect();
-            let program = crate::abstraction::program::GeneralizedProgram::new(abstract_steps, 1.0, ksg_pairs.len());
+            };
+            let program = crate::abstraction::program::GeneralizedProgram::new(
+                vec![abstract_step],
+                1.0,
+                ksg_pairs.len(),
+            );
             self.program_synthesizer.generalized_programs.push(program);
         }
 
