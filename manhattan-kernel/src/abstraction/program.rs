@@ -64,86 +64,12 @@ impl std::fmt::Debug for AbstractStep {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-/// Spatial relation between two objects (anchor → target)
-#[derive(Debug, Clone, PartialEq)]
-pub enum SpatialRelation {
-    Above,
-    Below,
-    LeftOf,
-    RightOf,
-    TouchingNorth,
-    TouchingSouth,
-    TouchingEast,
-    TouchingWest,
-    AlignTop,
-    AlignBottom,
-    AlignLeft,
-    AlignRight,
-    CenterInside,
-    MirrorHorizontal,
-    MirrorVertical,
-    RotateAround,
-}
-
 pub enum TargetSpec {
     Constant(String),
     RelativeToNode { condition: Box<Condition>, dx_offset: i64, dy_offset: i64 },
     GridAnchor { corner: GridCorner },
     CopyAttributeFrom { condition: Box<Condition>, attribute: String },
-    /// Semantic spatial relation between moved object and anchor
-    SemanticRelation { relation: SpatialRelation, anchor_predicate: Box<dyn Predicate> },
 }
-
-
-impl PartialEq for TargetSpec {
-    fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (TargetSpec::Constant(a), TargetSpec::Constant(b)) => a == b,
-            (TargetSpec::RelativeToNode { condition: c1, dx_offset: dx1, dy_offset: dy1 },
-             TargetSpec::RelativeToNode { condition: c2, dx_offset: dx2, dy_offset: dy2 }) =>
-                c1 == c2 && dx1 == dx2 && dy1 == dy2,
-            (TargetSpec::GridAnchor { corner: c1 }, TargetSpec::GridAnchor { corner: c2 }) => c1 == c2,
-            (TargetSpec::CopyAttributeFrom { condition: c1, attribute: a1 },
-             TargetSpec::CopyAttributeFrom { condition: c2, attribute: a2 }) => c1 == c2 && a1 == a2,
-            (TargetSpec::SemanticRelation { relation: r1, anchor_predicate: p1 },
-             TargetSpec::SemanticRelation { relation: r2, anchor_predicate: p2 }) =>
-                r1 == r2 && p1.name() == p2.name(),
-            _ => false,
-        }
-    }
-}
-
-impl std::fmt::Debug for TargetSpec {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            TargetSpec::Constant(v) => write!(f, "Constant({})", v),
-            TargetSpec::RelativeToNode { condition, dx_offset, dy_offset } =>
-                write!(f, "RelativeToNode({}, {}, {})", condition.name(), dx_offset, dy_offset),
-            TargetSpec::GridAnchor { corner } => write!(f, "GridAnchor({:?})", corner),
-            TargetSpec::CopyAttributeFrom { condition, attribute } =>
-                write!(f, "CopyAttributeFrom({}, {})", condition.name(), attribute),
-            TargetSpec::SemanticRelation { relation, anchor_predicate } =>
-                write!(f, "SemanticRelation({:?}, {})", relation, anchor_predicate.name()),
-        }
-    }
-}
-
-
-impl Clone for TargetSpec {
-    fn clone(&self) -> Self {
-        match self {
-            TargetSpec::Constant(v) => TargetSpec::Constant(v.clone()),
-            TargetSpec::RelativeToNode { condition, dx_offset, dy_offset } =>
-                TargetSpec::RelativeToNode { condition: condition.clone(), dx_offset: *dx_offset, dy_offset: *dy_offset },
-            TargetSpec::GridAnchor { corner } => TargetSpec::GridAnchor { corner: corner.clone() },
-            TargetSpec::CopyAttributeFrom { condition, attribute } =>
-                TargetSpec::CopyAttributeFrom { condition: condition.clone(), attribute: attribute.clone() },
-            TargetSpec::SemanticRelation { relation, anchor_predicate } =>
-                TargetSpec::SemanticRelation { relation: relation.clone(), anchor_predicate: anchor_predicate.clone_box() },
-        }
-    }
-}
-
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum GridCorner { TopLeft, TopRight, BottomLeft, BottomRight }
@@ -248,36 +174,6 @@ impl GeneralizedProgram {
                 if let Some(ref_node) = refs.first() {
                     let val = ref_node.attributes.get(attribute).cloned();
                     Some((0, 0, val))
-                } else { None }
-            }
-            TargetSpec::SemanticRelation { relation, anchor_predicate } => {
-                let refs = Self::matching_nodes(graph, anchor_predicate.as_ref());
-                if let Some(ref_node) = refs.first() {
-                    let rx: i64 = ref_node.attributes.get("bbox_x").and_then(|v| v.parse().ok()).unwrap_or(0);
-                    let ry: i64 = ref_node.attributes.get("bbox_y").and_then(|v| v.parse().ok()).unwrap_or(0);
-                    let rw: i64 = ref_node.attributes.get("bbox_w").and_then(|v| v.parse().ok()).unwrap_or(0);
-                    let rh: i64 = ref_node.attributes.get("bbox_h").and_then(|v| v.parse().ok()).unwrap_or(0);
-                    // A mozgó objektum méreteit is kiolvassuk a kiválasztott node-ból (a hívó oldalon)
-                    // Itt a célkoordinátákat a reláció alapján számoljuk
-                    let (tx, ty) = match relation {
-                        SpatialRelation::Above => (rx + rw/2, ry - rh/2),
-                        SpatialRelation::Below => (rx + rw/2, ry + rh + rh/2),
-                        SpatialRelation::LeftOf => (rx - rw/2, ry + rh/2),
-                        SpatialRelation::RightOf => (rx + rw + rw/2, ry + rh/2),
-                        SpatialRelation::TouchingNorth => (rx + rw/2, ry),
-                        SpatialRelation::TouchingSouth => (rx + rw/2, ry + rh),
-                        SpatialRelation::TouchingEast => (rx + rw, ry + rh/2),
-                        SpatialRelation::TouchingWest => (rx, ry + rh/2),
-                        SpatialRelation::AlignTop => (rx + rw/2, ry),
-                        SpatialRelation::AlignBottom => (rx + rw/2, ry + rh),
-                        SpatialRelation::AlignLeft => (rx, ry + rh/2),
-                        SpatialRelation::AlignRight => (rx + rw, ry + rh/2),
-                        SpatialRelation::CenterInside => (rx + rw/2, ry + rh/2),
-                        SpatialRelation::MirrorHorizontal => (grid_width as i64 - rx - rw, ry),
-                        SpatialRelation::MirrorVertical => (rx, grid_height as i64 - ry - rh),
-                        SpatialRelation::RotateAround => (rx + rw/2, ry + rh/2), // placeholder
-                    };
-                    Some((tx, ty, None))
                 } else { None }
             }
 
