@@ -180,6 +180,13 @@ impl MetaLearner {
             self.program_synthesizer.generalized_programs.push(program);
         }
 
+        // Module 3: Solver – finomhangolás a SHE kimenetén
+        let solver = crate::solver::Solver::new();
+        let refined_programs = solver.refine(&common_steps, &ksg_pairs);
+        for prog in refined_programs {
+            self.program_synthesizer.generalized_programs.push(prog);
+        }
+
         self.program_synthesizer.consolidate();
     }
 
@@ -203,7 +210,14 @@ impl MetaLearner {
             // static concept detected (logged internally)
         }
         if self.program_synthesizer.generalized_programs.len() > 50 {
-            self.program_synthesizer.consolidate();
+            // Module 3: Solver – finomhangolás a SHE kimenetén
+        let solver = crate::solver::Solver::new();
+        let refined_programs = solver.refine(&common_steps, &ksg_pairs);
+        for prog in refined_programs {
+            self.program_synthesizer.generalized_programs.push(prog);
+        }
+
+        self.program_synthesizer.consolidate();
         }
     }
 

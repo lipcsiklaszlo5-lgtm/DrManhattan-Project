@@ -22,3 +22,4 @@ pub mod predicate;
 pub mod object_selector;
 pub mod semantic_generalization;
 pub mod semantic_hypothesis;
+pub mod solver;
